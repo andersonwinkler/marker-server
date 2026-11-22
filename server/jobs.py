@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-'''Sequential job queue: one Marker conversion at a time (no GPU contention).'''
+'''
+Sequential job queue: one Marker conversion at a time (no GPU contention).
 
+Conversions run in a killable subprocess that holds the Marker models. On
+progress stall or cancel, the parent terminates that process and respawns it
+so the FIFO queue can continue.
+'''
+
+import multiprocessing as mp
 import os
+import queue
 import threading
 import time
-import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Optional
 
-from pipeline import convert_document
+from config import config_path
+from convert_worker import worker_main
+
+_SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _utcnow():
@@ -42,33 +52,41 @@ class Job:
     error: Optional[str] = None
     cancel_requested: bool = False
     stall_timed_out: bool = False
+    # True while the conversion subprocess may still be reading the input.
+    worker_active: bool = False
 
 
 class JobManager:
     '''
-    In-process FIFO worker. Jobs never run in parallel against each other.
+    In-process FIFO scheduler + killable conversion subprocess.
 
-    Running jobs are failed if progress stops updating for
-    progress_stall_seconds (when total > 1 so mid-run progress exists).
-    There is no absolute wall-clock job timeout.
+    Running jobs fail if progress stops for progress_stall_seconds (including
+    single-pass jobs, measured from the last progress event / start). There is
+    no separate absolute wall-clock limit: a long job is fine if progress keeps
+    moving. Set progress_stall_seconds to 0 to disable.
     '''
 
     def __init__(
             self,
-            artifact_getter: Callable[[], dict],
             upload_dir: Optional[str] = None,
             job_ttl_seconds: int = 3600,
-            progress_stall_seconds: int = 7200):
-        self._artifact_getter = artifact_getter
+            progress_stall_seconds: int = 7200,
+            worker_ready_timeout: float = 600.0):
         self._upload_dir = (
             os.path.realpath(upload_dir) if upload_dir else None)
         self._job_ttl_seconds = max(60, int(job_ttl_seconds))
-        # 0 disables stall detection.
         self._progress_stall_seconds = max(0, int(progress_stall_seconds))
+        self._worker_ready_timeout = float(worker_ready_timeout)
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._queue: list[str] = []
+        self._ctx = mp.get_context('spawn')
+        self._cmd_q = None
+        self._event_q = None
+        self._proc = None
+        self._current_job_id: Optional[str] = None
+        self._shutdown = False
         self._worker = threading.Thread(
             target=self._worker_loop, name='marker-job-worker', daemon=True)
         self._worker.start()
@@ -103,17 +121,19 @@ class JobManager:
     def release(self, job_id: str) -> Optional[Job]:
         '''
         Drop a finished job from memory (result + metadata).
-        Queued → cancel; running → request cancel; terminal → purge now.
+        Queued → cancel; running → request cancel (+ kill worker);
+        terminal → purge now (unless worker still holds the input).
         '''
+        kill_worker = False
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 return None
             if job.status in ('done', 'failed', 'cancelled'):
-                self._maybe_delete_input(job)
-                snapshot = job
-                self._jobs.pop(job_id, None)
-                return snapshot
+                if not job.worker_active:
+                    self._maybe_delete_input(job)
+                    self._jobs.pop(job_id, None)
+                return job
             job.cancel_requested = True
             if job.status == 'queued':
                 job.status = 'cancelled'
@@ -122,7 +142,17 @@ class JobManager:
                 if job_id in self._queue:
                     self._queue.remove(job_id)
                 self._maybe_delete_input(job)
-            return job
+            elif job.status == 'running':
+                kill_worker = True
+        if kill_worker:
+            self._kill_worker()
+        return job
+
+    def shutdown(self):
+        self._shutdown = True
+        with self._cv:
+            self._cv.notify_all()
+        self._kill_worker()
 
     def status_dict(self, job: Job) -> dict:
         return {
@@ -149,6 +179,8 @@ class JobManager:
 
     def _maybe_delete_input(self, job: Job):
         '''Delete only upload-owned files under the upload directory.'''
+        if job.worker_active:
+            return
         if not job.delete_filepath:
             return
         path = job.filepath
@@ -167,33 +199,25 @@ class JobManager:
             jid for jid, job in self._jobs.items()
             if job.finished_ts is not None
             and job.status in ('done', 'failed', 'cancelled')
+            and not job.worker_active
             and (now - job.finished_ts) >= ttl]
         for jid in expired:
             job = self._jobs.pop(jid, None)
             if job is not None:
                 self._maybe_delete_input(job)
 
-    def _check_stall_locked(self):
+    def _check_stall_locked(self) -> bool:
         '''
-        Fail jobs that stop reporting progress.
-
-        Only applies when progress.total > 1 (chunked / multi-pass), where
-        Marker emits mid-run updates. Single-pass jobs (total <= 1) have no
-        absolute wall-clock limit — raise progress_stall_seconds or use a
-        chunking-friendly profile if you need stall coverage on long runs.
-
-        Status flips to failed immediately so clients see it; the worker may
-        still be blocked inside Marker until the current pass returns.
+        Fail + request kill when progress stops for progress_stall_seconds.
+        Returns True if the current worker should be killed.
         '''
         stall = self._progress_stall_seconds
         if stall <= 0:
-            return
+            return False
         now = _utcnow_ts()
+        kill = False
         for job in self._jobs.values():
-            if job.status != 'running':
-                continue
-            total = int(job.progress.get('total') or 0)
-            if total <= 1:
+            if job.status != 'running' or job.stall_timed_out:
                 continue
             last = job.progress_ts or job.started_ts
             if last is None:
@@ -209,91 +233,229 @@ class JobManager:
             job.finished_at = _utcnow()
             job.finished_ts = now
             job.stage = 'failed'
+            if job.job_id == self._current_job_id:
+                kill = True
+        return kill
+
+    def _start_worker(self):
+        self._cmd_q = self._ctx.Queue()
+        self._event_q = self._ctx.Queue()
+        cfg = config_path() or ''
+        self._proc = self._ctx.Process(
+            target=worker_main,
+            args=(self._cmd_q, self._event_q, cfg, _SERVER_DIR),
+            name='marker-convert-worker',
+            daemon=True)
+        self._proc.start()
+        deadline = time.time() + self._worker_ready_timeout
+        while time.time() < deadline:
+            try:
+                evt = self._event_q.get(timeout=1.0)
+            except queue.Empty:
+                if not self._proc.is_alive():
+                    raise RuntimeError('Conversion worker exited before ready')
+                continue
+            if evt and evt[0] == 'ready':
+                return
+        raise RuntimeError('Timed out waiting for conversion worker ready')
+
+    def _kill_worker(self):
+        proc = self._proc
+        self._proc = None
+        cmd_q, event_q = self._cmd_q, self._event_q
+        self._cmd_q = None
+        self._event_q = None
+        if proc is None:
+            return
+        try:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
+        except Exception:
+            pass
+        for q in (cmd_q, event_q):
+            if q is None:
+                continue
+            try:
+                q.close()
+            except Exception:
+                pass
+
+    def _ensure_worker(self):
+        if self._proc is not None and self._proc.is_alive():
+            return
+        self._kill_worker()
+        self._start_worker()
 
     def _reaper_loop(self):
-        while True:
-            time.sleep(min(30, self._job_ttl_seconds))
+        while not self._shutdown:
+            time.sleep(min(15, self._job_ttl_seconds))
+            kill = False
             with self._lock:
-                self._check_stall_locked()
+                kill = self._check_stall_locked()
                 self._purge_expired_locked()
+            if kill:
+                self._kill_worker()
+
+    def _finish_job_locked(self, job: Job, status: str, error: Optional[str] = None):
+        job.status = status
+        if error is not None:
+            job.error = error
+        job.finished_at = _utcnow()
+        job.finished_ts = _utcnow_ts()
+        job.stage = status
+        job.worker_active = False
+        self._maybe_delete_input(job)
 
     def _worker_loop(self):
-        while True:
+        while not self._shutdown:
             with self._cv:
-                while not self._queue:
-                    self._cv.wait()
+                while not self._queue and not self._shutdown:
+                    self._cv.wait(timeout=1.0)
+                if self._shutdown:
+                    break
+                if not self._queue:
+                    continue
                 job_id = self._queue.pop(0)
                 job = self._jobs[job_id]
                 if job.cancel_requested or job.status == 'cancelled':
-                    job.status = 'cancelled'
-                    job.finished_at = _utcnow()
-                    job.finished_ts = _utcnow_ts()
-                    self._maybe_delete_input(job)
+                    self._finish_job_locked(job, 'cancelled')
                     continue
                 job.status = 'running'
                 job.started_at = _utcnow()
                 job.started_ts = _utcnow_ts()
                 job.progress_ts = job.started_ts
                 job.stage = 'running'
+                job.worker_active = True
+                self._current_job_id = job_id
                 filepath = job.filepath
                 options = dict(job.options)
 
-            def progress_cb(update: dict):
+            try:
+                self._ensure_worker()
+            except Exception as exc:
                 with self._lock:
-                    job.progress = {
-                        'done': int(update.get('done') or 0),
-                        'total': int(update.get('total') or 0)}
-                    job.progress_ts = _utcnow_ts()
-                    if update.get('stage') is not None:
-                        job.stage = update.get('stage')
-                    if job.cancel_requested:
-                        if job.stall_timed_out:
-                            raise RuntimeError(
-                                job.error or 'Job stalled (no progress)')
-                        raise RuntimeError('Job cancelled')
+                    self._finish_job_locked(job, 'failed', str(exc))
+                    self._current_job_id = None
+                continue
 
             try:
-                artifact_dict = self._artifact_getter()
-                result = convert_document(
-                    filepath, options, artifact_dict, progress_cb=progress_cb)
+                self._cmd_q.put(('run', job_id, filepath, options))
+            except Exception as exc:
                 with self._lock:
-                    if job.stall_timed_out:
-                        # Already failed by the stall watchdog; discard result.
-                        job.status = 'failed'
-                        job.stage = 'failed'
-                        job.result = None
-                        if not job.finished_ts:
+                    self._finish_job_locked(
+                        job, 'failed', f'Failed to dispatch job: {exc}')
+                    self._current_job_id = None
+                self._kill_worker()
+                continue
+
+            finished = False
+            while not finished and not self._shutdown:
+                kill = False
+                with self._lock:
+                    if job.stall_timed_out or (
+                            job.cancel_requested and job.status == 'running'):
+                        if job.stall_timed_out:
+                            job.status = 'failed'
+                            job.stage = 'failed'
+                            if not job.finished_ts:
+                                job.finished_at = _utcnow()
+                                job.finished_ts = _utcnow_ts()
+                        elif job.cancel_requested:
+                            self._finish_job_locked(job, 'cancelled')
+                        kill = True
+                    elif self._check_stall_locked():
+                        kill = True
+
+                if kill:
+                    self._kill_worker()
+                    with self._lock:
+                        job.worker_active = False
+                        self._maybe_delete_input(job)
+                        self._current_job_id = None
+                    finished = True
+                    break
+
+                try:
+                    evt = self._event_q.get(timeout=0.5)
+                except queue.Empty:
+                    if self._proc is None or not self._proc.is_alive():
+                        with self._lock:
+                            if job.stall_timed_out or job.status == 'failed':
+                                job.worker_active = False
+                                self._maybe_delete_input(job)
+                            elif job.cancel_requested:
+                                self._finish_job_locked(job, 'cancelled')
+                            elif job.status == 'running':
+                                self._finish_job_locked(
+                                    job, 'failed',
+                                    'Conversion worker died unexpectedly')
+                            else:
+                                job.worker_active = False
+                                self._maybe_delete_input(job)
+                            self._current_job_id = None
+                        finished = True
+                    continue
+
+                kind = evt[0]
+                if kind == 'progress':
+                    _, eid, update = evt
+                    if eid != job_id:
+                        continue
+                    with self._lock:
+                        if job.cancel_requested or job.stall_timed_out:
+                            # Ignore late progress after stall/cancel.
+                            continue
+                        job.progress = {
+                            'done': int(update.get('done') or 0),
+                            'total': int(update.get('total') or 0)}
+                        job.progress_ts = _utcnow_ts()
+                        if update.get('stage') is not None:
+                            job.stage = update.get('stage')
+                elif kind == 'done':
+                    _, eid, result = evt
+                    if eid != job_id:
+                        continue
+                    with self._lock:
+                        if job.stall_timed_out:
+                            job.status = 'failed'
+                            job.result = None
+                            job.worker_active = False
+                            self._maybe_delete_input(job)
+                        elif job.cancel_requested:
+                            self._finish_job_locked(job, 'cancelled')
+                        else:
+                            job.result = result
+                            job.status = 'done'
                             job.finished_at = _utcnow()
                             job.finished_ts = _utcnow_ts()
-                    elif job.cancel_requested:
-                        job.status = 'cancelled'
-                        job.finished_at = _utcnow()
-                        job.finished_ts = _utcnow_ts()
-                        job.stage = 'cancelled'
-                    else:
-                        job.result = result
-                        job.status = 'done'
-                        job.finished_at = _utcnow()
-                        job.finished_ts = _utcnow_ts()
-                        job.stage = 'done'
-                        if job.progress.get('total'):
-                            job.progress['done'] = job.progress['total']
-            except Exception as exc:
-                traceback.print_exc()
-                with self._lock:
-                    if job.stall_timed_out:
-                        job.status = 'failed'
-                        job.error = job.error or str(exc)
-                    elif job.cancel_requested:
-                        job.status = 'cancelled'
-                        job.error = str(exc)
-                    else:
-                        job.status = 'failed'
-                        job.error = str(exc)
-                    if not job.finished_ts:
-                        job.finished_at = _utcnow()
-                        job.finished_ts = _utcnow_ts()
-                    job.stage = job.status
-            finally:
-                with self._lock:
-                    self._maybe_delete_input(job)
+                            job.stage = 'done'
+                            if job.progress.get('total'):
+                                job.progress['done'] = job.progress['total']
+                            job.worker_active = False
+                            self._maybe_delete_input(job)
+                        self._current_job_id = None
+                    finished = True
+                elif kind == 'error':
+                    _, eid, err = evt
+                    if eid != job_id:
+                        continue
+                    with self._lock:
+                        if job.stall_timed_out:
+                            job.status = 'failed'
+                            job.worker_active = False
+                            self._maybe_delete_input(job)
+                        elif job.cancel_requested:
+                            self._finish_job_locked(job, 'cancelled', err)
+                        else:
+                            # Keep the short message; full traceback is in err.
+                            short = (err or '').split('\n', 1)[0] or 'error'
+                            self._finish_job_locked(job, 'failed', short)
+                        self._current_job_id = None
+                    finished = True
+                elif kind == 'ready':
+                    # Late ready from a respawn; ignore.
+                    continue

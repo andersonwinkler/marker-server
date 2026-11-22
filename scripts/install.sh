@@ -131,9 +131,13 @@ chmod 640 "$CONFIG"
 
 if [[ -d "$MARKER_HOME" ]]; then
   # Do NOT chmod a+rX the whole tree (leaks HF tokens etc.).
-  # Grant the service user read/execute via ACL, or group fallback.
+  # Undo world-readable bits from older installers (5e21f56 used a+rX).
+  chmod -R o-rwx "$MARKER_HOME" 2>/dev/null || true
+  # Grant the service user read/execute via ACL (+ default ACL for new files),
+  # or group fallback when setfacl is unavailable.
   if command -v setfacl >/dev/null 2>&1; then
     setfacl -R -m "u:${MARKER_USER}:rX" "$MARKER_HOME" || true
+    find "$MARKER_HOME" -type d -exec setfacl -d -m "u:${MARKER_USER}:rX" {} + 2>/dev/null || true
   else
     chgrp -R "$MARKER_USER" "$MARKER_HOME" || true
     chmod -R g+rX "$MARKER_HOME" || true

@@ -88,7 +88,7 @@ sudo systemctl enable --now marker-server-api.service marker-server-ui.service
 - Creates system user `marker` (override with `MARKER_USER=…`) with home `/var/lib/marker-server`
 - Adds `video` / `render` for GPU nodes; adds `docker` only for vLLM (or `MARKER_DOCKER=1`) — docker membership is effectively root
 - Installs code as **root-owned**; only `uploads/` + `jobs/` are writable by `marker`; `config.json` is `root:marker` mode `640`
-- Grants `marker` read access to `marker.home` via ACL (or group), with `cache/` + `hf/` mode `700` owned by `marker`
+- Grants `marker` read access to `marker.home` via ACL + **default ACL** on directories (so later pip/GGUF files stay readable), strips world bits from older `a+rX` installs, and keeps `cache/` + `hf/` mode `700` owned by `marker`
 - Installs thin HTTP deps into **Marker’s venv** and a small local UI venv; systemd units use `User=marker`
 
 API: `http://127.0.0.1:8001` · UI: `http://127.0.0.1:8002` · OpenAPI: `/docs`
@@ -118,7 +118,7 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 | `upload_dir` | Temp uploads; default `<prefix>/uploads` |
 | `max_upload_bytes` | Reject larger uploads (default 512 MiB); also enforce at the reverse proxy |
 | `job_ttl_seconds` | Drop finished jobs (including results) after this many seconds (default 3600); `DELETE` releases early |
-| `progress_stall_seconds` | Fail a job if a progress unit (chunk / Marker pass) produces no update for this long (default **7200**). **No absolute job wall-clock timeout** — a 10-hour job is fine if units keep finishing. `0` disables. Single-pass jobs (`total ≤ 1`) have no mid-run progress, so stall detection does not apply to them |
+| `progress_stall_seconds` | Fail a job if no progress update arrives for this long (default **7200**), then **kill the conversion subprocess** and continue the queue. A 10-hour job is fine if progress keeps moving. `0` disables. Single-pass jobs only update at start/end, so this is effectively a per-pass limit — raise it for huge one-shot HTML converts |
 | `allowed_input_dirs` | Allowlist for `POST /marker` paths. `[]` (default) disables path convert; `null` allows any path the service user can read |
 
 ### `surya`
@@ -201,7 +201,7 @@ When enabled, the server:
 
 Progress `total` is the number of planned chunks.
 
-**Limits:** any HTML delivery always uses a single pass (no HTML stitcher) — large HTML jobs can be one long GPU pass with `total=1` (stall watchdog does not apply). Prefer `clean` / `rag` / `dual` for long PDFs so chunk progress is visible. Cancel during a single Marker pass is weak (see API docs). `dual` may run Marker twice (progress `total` reflects the pass count).
+**Limits:** any HTML delivery always uses a single pass (no HTML stitcher). Prefer `clean` / `rag` / `dual` for long PDFs so chunk progress is visible. Stall/cancel kills the conversion subprocess (models reload on the next job). `dual` may run Marker twice (progress `total` reflects the pass count).
 
 ---
 
@@ -241,12 +241,12 @@ cp config.example.json config.json
 ## Security notes
 
 - systemd runs API and UI as **`marker`** (not root). Code under `/opt/marker-server/<ver>/` is root-owned; the service only writes `uploads/`, `jobs/`, and Marker `cache/`/`hf/`.
-- **Docker ≈ root:** the default Surya vLLM path needs the `docker` group. That undoes much of the privilege drop. Use `surya.inference_backend=llamacpp` (no docker group) or accept the trade-off; set `MARKER_DOCKER=0` only if the backend is not vLLM.
+- **Docker ≈ root:** a **default install** (`surya.inference_backend` unset → vLLM) still adds `marker` to the `docker` group and prints a warning. That undoes much of the privilege drop. Choose deliberately: keep vLLM, or set `surya.inference_backend=llamacpp` / `MARKER_DOCKER=0` to skip docker.
 - The API has **no built-in authentication**. Default bind is `127.0.0.1`. If you reverse-proxy it, restrict by network (see the Apache example) or put your own auth in front.
 - LLM credentials live only in server `config.json` (`root:marker` mode `640`). Never commit that file; clients cannot supply the endpoint or key.
 - Uploaded filenames are sanitized (basename only). Only files under `upload_dir` created by `/marker/upload` are deleted after a job; `POST /marker` never deletes its `filepath` and is disabled by default (`allowed_input_dirs: []`).
 - Uploads are capped by `max_upload_bytes` (and `LimitRequestBody` in the Apache example). Prefer keeping the service off the public internet unless you add auth.
-- HTTP / reverse-proxy timeouts cover **upload and result transfer only**. Conversion jobs are async and are not killed by wall-clock HTTP limits; they fail only on **progress stall** (`progress_stall_seconds`).
+- HTTP / reverse-proxy timeouts cover **upload and result transfer only**. Conversion jobs are async; a **progress stall** fails the job and kills the conversion worker so the queue continues (models reload on the next job).
 
 ## License
 

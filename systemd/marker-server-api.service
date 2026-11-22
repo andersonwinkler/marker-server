@@ -15,7 +15,8 @@ ExecStart=/opt/marker-server/0.1.0/bin/run-api.sh
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=300
-# No absolute job runtime limit — jobs fail only on progress stall (see config).
+# No absolute job wall-clock limit. progress_stall_seconds kills the conversion
+# subprocess so the queue continues (see config / docs).
 UMask=0027
 NoNewPrivileges=true
 # PrivateTmp=false: Surya/vLLM may bind-mount host /tmp paths into containers.

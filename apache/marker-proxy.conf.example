@@ -6,8 +6,8 @@
 ProxyRequests Off
 ProxyPreserveHost Off
 
-# Transfer timeouts only (upload / streaming result). Conversion itself is async
-# and limited by runtime.progress_stall_seconds, not by these values.
+# Transfer timeouts only (upload / streaming result). Conversion is async; a
+# progress stall fails the job and kills the worker so the queue continues.
 Timeout 21600
 ProxyTimeout 21600
 

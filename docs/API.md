@@ -111,7 +111,7 @@ Returned by upload, status, and cancel.
 
 Clients that want a percentage compute `done / total` themselves. There is no fraction field and no human-readable progress string.
 
-The server uses these updates for **stall detection**: if `total > 1` and no progress callback arrives for `progress_stall_seconds`, the job is failed. Total job duration can exceed that as long as units keep completing.
+The server uses these updates for **stall detection**: if no progress callback arrives for `progress_stall_seconds`, the job is failed and the conversion worker process is killed so the queue continues. Total job duration can exceed that as long as units keep completing.
 
 ### `stage` (informational)
 
@@ -284,7 +284,7 @@ Finished jobs (including the result payload) stay in memory until `runtime.job_t
 Cancel an active job, or release a finished one early (free memory).
 
 - If `queued`: removed from queue → `cancelled` immediately
-- If `running`: best-effort. Cancel is checked in the progress callback between chunk windows / Marker passes. A **single-pass** job only reports progress before and after `run_marker()`, so cancel may take effect only after that conversion finishes. Marker itself has no mid-run stop API.
+- If `running`: the conversion subprocess is **terminated**, so cancel/stall unblocks the queue even when Marker is hung mid-pass (models reload on the next job).
 - If `done` / `failed` / `cancelled`: job (and result) are dropped from memory immediately
 
 ### Response `200`
@@ -454,7 +454,7 @@ The browser UI (`:8002`) does not redefine the API; it proxies:
 ## Notes for integrators
 
 1. **Auth:** this API has no built-in authentication. Keep it on localhost or protect it at the reverse proxy.
-2. **Timeouts:** conversion jobs have **no absolute wall-clock limit**. They fail only if a progress unit (chunk or Marker pass) reports no update for `runtime.progress_stall_seconds` (default 7200). HTTP timeouts on clients/proxies should cover upload/result transfer and status polls only — not total conversion time. Single-pass jobs (`progress.total ≤ 1`) have no mid-run progress, so the stall watchdog does not apply to them.
+2. **Timeouts:** conversion jobs have **no absolute wall-clock limit**. They fail if no progress update arrives for `runtime.progress_stall_seconds` (default 7200); the conversion **subprocess is then killed** so queued jobs can run (Marker models reload on the next job). HTTP timeouts on clients/proxies should cover upload/result transfer and status polls only — not total conversion time. Single-pass jobs only emit progress at start/end, so the stall timer is effectively a per-pass limit — raise it for very long one-shot converts.
 3. **Concurrency:** submitting many jobs is fine; they queue. Only one runs. Don’t also run Marker CLI on the same GPU during a heavy job.
 4. **Chunking + `page_range`:** a non-empty `page_range` turns off auto page-block splitting for that request. Any request that includes HTML (`profile=html` or `include_html=true`) always uses a single Marker pass (no HTML stitcher).
 5. **Dual / mixed deliveries:** `profile=dual` (or any request that asks for both markdown and blocks) currently runs Marker once per output format. Expect roughly 2× GPU time until a single-build multi-render path lands.

@@ -78,18 +78,16 @@ def _path_allowed(filepath: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from marker.models import create_model_dict, shutdown_models
+    # Models load inside the killable conversion subprocess (not here).
     rt = runtime_settings()
-    app_data['models'] = create_model_dict()
-    app_data['jobs'] = JobManager(
-        lambda: app_data['models'],
+    jobs = JobManager(
         upload_dir=UPLOAD_DIRECTORY,
         job_ttl_seconds=int(rt.get('job_ttl_seconds') or 3600),
         progress_stall_seconds=int(rt.get('progress_stall_seconds') or 7200))
+    app_data['jobs'] = jobs
     yield
-    if 'models' in app_data:
-        shutdown_models(app_data['models'])
-        del app_data['models']
+    jobs.shutdown()
+    app_data.pop('jobs', None)
 
 
 app = FastAPI(
