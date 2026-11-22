@@ -13,6 +13,7 @@
     "max_upload_bytes": 536870912,
     "job_ttl_seconds": 3600,
     "progress_stall_seconds": 7200,
+    "worker_ready_seconds": 1800,
     "allowed_input_dirs": []
   },
   "surya": {

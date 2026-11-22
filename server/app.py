@@ -83,8 +83,12 @@ async def lifespan(app: FastAPI):
     jobs = JobManager(
         upload_dir=UPLOAD_DIRECTORY,
         job_ttl_seconds=int(rt.get('job_ttl_seconds') or 3600),
-        progress_stall_seconds=int(rt.get('progress_stall_seconds') or 7200))
+        progress_stall_seconds=int(rt.get('progress_stall_seconds') or 7200),
+        worker_ready_timeout=float(
+            rt.get('worker_ready_seconds') or 1800))
     app_data['jobs'] = jobs
+    # Prefetch models so the first real job is not cold; failures are logged.
+    jobs.warm_start()
     yield
     jobs.shutdown()
     app_data.pop('jobs', None)
@@ -168,6 +172,7 @@ async def version():
         'llm_enabled': bool(defaults.get('use_llm')),
         'llm_model': defaults.get('openai_model') if defaults.get('use_llm') else None,
         'progress_stall_seconds': rt.get('progress_stall_seconds'),
+        'worker_ready_seconds': rt.get('worker_ready_seconds'),
         'job_ttl_seconds': rt.get('job_ttl_seconds'),
         'chunking': chunk}
 

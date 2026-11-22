@@ -108,6 +108,9 @@ def runtime_settings():
     stall = rt.get('progress_stall_seconds')
     if stall is None:
         stall = env_int('MARKER_PROGRESS_STALL_SECONDS', 7200)
+    worker_ready = rt.get('worker_ready_seconds')
+    if worker_ready is None:
+        worker_ready = env_int('MARKER_WORKER_READY_SECONDS', 1800)
     # null → any readable path; [] → POST /marker disabled; else allowlist.
     allowed = rt.get('allowed_input_dirs', [])
     if allowed is None:
@@ -128,6 +131,7 @@ def runtime_settings():
         'max_upload_bytes': int(max_upload),
         'job_ttl_seconds': int(job_ttl),
         'progress_stall_seconds': int(stall),
+        'worker_ready_seconds': int(worker_ready),
         'allowed_input_dirs': allowed_dirs,
         'marker_home': home}
 

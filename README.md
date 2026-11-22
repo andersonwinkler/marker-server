@@ -118,7 +118,8 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 | `upload_dir` | Temp uploads; default `<prefix>/uploads` |
 | `max_upload_bytes` | Reject larger uploads (default 512 MiB); also enforce at the reverse proxy |
 | `job_ttl_seconds` | Drop finished jobs (including results) after this many seconds (default 3600); `DELETE` releases early |
-| `progress_stall_seconds` | Fail a job if no progress update arrives for this long (default **7200**), then **kill the conversion subprocess** and continue the queue. A 10-hour job is fine if progress keeps moving. `0` disables. Single-pass jobs only update at start/end, so this is effectively a per-pass limit — raise it for huge one-shot HTML converts |
+| `progress_stall_seconds` | Fail a job if no progress update arrives for this long (default **7200**), then **kill the conversion subprocess**, **stop Surya’s OCR server** (docker/PID from `~/.cache/datalab/surya/*_server.json`), and continue the queue. A 10-hour job is fine if progress keeps moving. `0` disables. Single-pass jobs only update at start/end, so this is effectively a per-pass limit — raise it for huge one-shot HTML converts |
+| `worker_ready_seconds` | How long to wait for the conversion worker to load models and report ready (default **1800**). The service also warm-starts the worker at boot |
 | `allowed_input_dirs` | Allowlist for `POST /marker` paths. `[]` (default) disables path convert; `null` allows any path the service user can read |
 
 ### `surya`
@@ -246,7 +247,7 @@ cp config.example.json config.json
 - LLM credentials live only in server `config.json` (`root:marker` mode `640`). Never commit that file; clients cannot supply the endpoint or key.
 - Uploaded filenames are sanitized (basename only). Only files under `upload_dir` created by `/marker/upload` are deleted after a job; `POST /marker` never deletes its `filepath` and is disabled by default (`allowed_input_dirs: []`).
 - Uploads are capped by `max_upload_bytes` (and `LimitRequestBody` in the Apache example). Prefer keeping the service off the public internet unless you add auth.
-- HTTP / reverse-proxy timeouts cover **upload and result transfer only**. Conversion jobs are async; a **progress stall** fails the job and kills the conversion worker so the queue continues (models reload on the next job).
+- HTTP / reverse-proxy timeouts cover **upload and result transfer only**. Conversion jobs are async; a **progress stall** fails the job, kills the conversion worker, and stops Surya’s OCR server so the next job does not reuse a hung inference backend (models reload on the next job).
 
 ## License
 
