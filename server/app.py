@@ -78,7 +78,7 @@ def _path_allowed(filepath: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Models load inside the killable conversion subprocess (not here).
+    # Marker models load in the conversion subprocess (started by JobManager).
     rt = runtime_settings()
     jobs = JobManager(
         upload_dir=UPLOAD_DIRECTORY,
@@ -87,8 +87,6 @@ async def lifespan(app: FastAPI):
         worker_ready_timeout=float(
             rt.get('worker_ready_seconds') or 1800))
     app_data['jobs'] = jobs
-    # Models load inside the job-worker thread at start (single reader of
-    # the conversion process event queue). Jobs submitted during load wait.
     yield
     jobs.shutdown()
     app_data.pop('jobs', None)
@@ -417,7 +415,6 @@ async def job_cancel(job_id: str):
     job = jobs.release(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail='Unknown job_id')
-    # Finished jobs are purged; active ones return updated status.
     return jobs.status_dict(job)
 
 

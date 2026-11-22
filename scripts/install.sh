@@ -61,7 +61,7 @@ for grp in video render; do
   fi
 done
 
-mkdir -p "$PREFIX"/{bin,server,uploads,jobs,apache,docs}
+mkdir -p "$PREFIX"/{bin,server,uploads,apache,docs}
 cp -a "$ROOT/server/." "$PREFIX/server/"
 cp -a "$ROOT/bin/." "$PREFIX/bin/"
 chmod 755 "$PREFIX/bin/"*.sh
@@ -123,8 +123,8 @@ deactivate
 # --- permissions: root owns code; marker owns runtime dirs only ---
 chown -R root:root "$PREFIX"
 chmod -R u=rwX,go=rX "$PREFIX"
-chown -R "$MARKER_USER:$MARKER_USER" "$PREFIX/uploads" "$PREFIX/jobs"
-chmod 700 "$PREFIX/uploads" "$PREFIX/jobs"
+chown -R "$MARKER_USER:$MARKER_USER" "$PREFIX/uploads"
+chmod 700 "$PREFIX/uploads"
 # Config readable by service, not writable.
 chown root:"$MARKER_USER" "$CONFIG"
 chmod 640 "$CONFIG"

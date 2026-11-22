@@ -156,7 +156,6 @@ class JobManager:
                 if job_id in self._queue:
                     self._queue.remove(job_id)
                 self._maybe_delete_input(job)
-            # running: worker loop / reaper will kill the subprocess
         return job
 
     def shutdown(self):

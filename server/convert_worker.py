@@ -20,7 +20,6 @@ def _test_worker_main(cmd_queue, event_queue, config_path: str, server_dir: str)
     import sys
     from pathlib import Path
 
-    # Simulate slow model load so callers can test submit-during-startup.
     try:
         delay = float(os.environ.get('MARKER_TEST_WORKER_READY_DELAY') or 0)
     except ValueError:
@@ -36,10 +35,9 @@ def _test_worker_main(cmd_queue, event_queue, config_path: str, server_dir: str)
             continue
         _, job_id, filepath, options = msg
         mode = (options or {}).get('_test_mode', 'ok')
-        # Optional detached helper + Surya-like sentinel (stall recovery test).
-        # Cmdline includes "llama-server" so surya_cleanup's PID check accepts it.
         stage = 'chunk'
         if (options or {}).get('_test_helper'):
+            # Detached helper + Surya-like sentinel (cmdline matches llama-server).
             helper = subprocess.Popen(
                 [
                     sys.executable, '-c',
@@ -51,14 +49,12 @@ def _test_worker_main(cmd_queue, event_queue, config_path: str, server_dir: str)
                 os.environ.get('MARKER_SURYA_CACHE_DIR')
                 or os.path.expanduser('~/.cache/datalab/surya'))
             cache.mkdir(parents=True, exist_ok=True)
-            sentinel = cache / 'vllm_server.json'
-            sentinel.write_text(json.dumps({
+            (cache / 'vllm_server.json').write_text(json.dumps({
                 'port': 9,
                 'pid': helper.pid,
                 'backend': 'vllm',
                 'cleanup_id': str(helper.pid),
                 'cleanup_kind': 'process'}))
-            # Embed pid in stage so tests can observe it without racing the file.
             stage = f'chunk+helper:{helper.pid}'
         event_queue.put((
             'progress', job_id,

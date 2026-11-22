@@ -135,8 +135,7 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
                 'n_pages': n_pages,
                 'n_chunks': 1})
 
-    # --- chunked path (sequential windows; never parallel) ---
-    # HTML-only is rejected above; chunked windows produce markdown + optional blocks.
+    # Chunked path: sequential windows (HTML requests never reach here).
     markdown, images, blocks, meta = convert_chunked(
         filepath,
         options,

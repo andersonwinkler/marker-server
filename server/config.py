@@ -56,11 +56,6 @@ def load_config():
     return data
 
 
-def reload_config():
-    load_config.cache_clear()
-    return load_config()
-
-
 def _section(name):
     section = load_config().get(name)
     return section if isinstance(section, dict) else {}
@@ -268,9 +263,3 @@ def chunking_defaults_from_env():
 
 def upload_dir():
     return runtime_settings()['upload_dir']
-
-
-def jobs_dir():
-    return os.getenv(
-        'MARKER_JOBS_DIR',
-        os.path.join(_SERVER_ROOT, 'jobs'))

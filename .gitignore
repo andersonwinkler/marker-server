@@ -1,7 +1,6 @@
 # Local / installed secrets and runtime
 config.json
 uploads/
-jobs/
 venv/
 __pycache__/
 *.py[cod]

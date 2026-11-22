@@ -87,7 +87,7 @@ sudo systemctl enable --now marker-server-api.service marker-server-ui.service
 
 - Creates system user `marker` (override with `MARKER_USER=…`) with home `/var/lib/marker-server`
 - Adds `video` / `render` for GPU nodes; adds `docker` only for vLLM (or `MARKER_DOCKER=1`) — docker membership is effectively root
-- Installs code as **root-owned**; only `uploads/` + `jobs/` are writable by `marker`; `config.json` is `root:marker` mode `640`
+- Installs code as **root-owned**; only `uploads/` is writable by `marker`; `config.json` is `root:marker` mode `640`
 - Grants `marker` read access to `marker.home` via ACL + **default ACL** on directories (so later pip/GGUF files stay readable), strips world bits from older `a+rX` installs, and keeps `cache/` + `hf/` mode `700` owned by `marker`
 - Installs thin HTTP deps into **Marker’s venv** and a small local UI venv; systemd units use `User=marker`
 
@@ -241,7 +241,7 @@ cp config.example.json config.json
 
 ## Security notes
 
-- systemd runs API and UI as **`marker`** (not root). Code under `/opt/marker-server/<ver>/` is root-owned; the service only writes `uploads/`, `jobs/`, and Marker `cache/`/`hf/`.
+- systemd runs API and UI as **`marker`** (not root). Code under `/opt/marker-server/<ver>/` is root-owned; the service only writes `uploads/` and Marker `cache/`/`hf/`.
 - **Docker ≈ root:** a **default install** (`surya.inference_backend` unset → vLLM) still adds `marker` to the `docker` group and prints a warning. That undoes much of the privilege drop. Choose deliberately: keep vLLM, or set `surya.inference_backend=llamacpp` / `MARKER_DOCKER=0` to skip docker.
 - The API has **no built-in authentication**. Default bind is `127.0.0.1`. If you reverse-proxy it, restrict by network (see the Apache example) or put your own auth in front.
 - LLM credentials live only in server `config.json` (`root:marker` mode `640`). Never commit that file; clients cannot supply the endpoint or key.
