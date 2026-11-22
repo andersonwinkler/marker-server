@@ -1,0 +1,16 @@
+[Unit]
+Description=Marker API server (jobs + chunking); uses vanilla Marker from config
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/marker-server/0.1.0
+Environment=MARKER_SERVER_CONFIG=/opt/marker-server/0.1.0/config.json
+ExecStart=/opt/marker-server/0.1.0/bin/run-api.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

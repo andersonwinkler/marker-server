@@ -1,0 +1,45 @@
+{
+  "marker": {
+    "home": "/opt/marker/2.0.0",
+    "python": null
+  },
+  "runtime": {
+    "cuda_visible_devices": "0",
+    "torch_device": "cuda",
+    "host": "127.0.0.1",
+    "port": 8001,
+    "ui_port": 8002,
+    "upload_dir": null
+  },
+  "surya": {
+    "inference_backend": null,
+    "llama_cpp_binary": null,
+    "gguf_model": null,
+    "gguf_mmproj": null,
+    "inference_parallel": 2,
+    "inference_keep_alive": true,
+    "guided_layout": false,
+    "llama_cpp_extra_args": null
+  },
+  "llm": {
+    "use_llm": false,
+    "openai_base_url": "http://127.0.0.1:8083/v1",
+    "openai_model": "Qwen3VL-8B-Instruct",
+    "openai_api_key": "",
+    "openai_image_format": "png",
+    "timeout": 300,
+    "llm_service": "marker.services.openai.OpenAIService"
+  },
+  "chunking": {
+    "chunking": "auto",
+    "chunk_threshold": 80,
+    "chunk_pages": 50,
+    "chunk_overlap": 2,
+    "table_aware_cuts": true,
+    "table_prescan": true,
+    "table_repair": true,
+    "table_llm_fallback": true,
+    "seam_polish": true,
+    "seam_chars": 600
+  }
+}

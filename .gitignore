@@ -1,0 +1,10 @@
+# Local / installed secrets and runtime
+config.json
+uploads/
+jobs/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.DS_Store

@@ -1,0 +1,46 @@
+# Example httpd reverse proxy for marker-server UI + API.
+# Copy to /etc/httpd/conf.d/marker-proxy.conf and adjust Require rules.
+#
+# UI:  /marker/      → 127.0.0.1:8002
+# API: /marker-api/  → 127.0.0.1:8001
+ProxyRequests Off
+ProxyPreserveHost Off
+
+Timeout 21600
+ProxyTimeout 21600
+
+RedirectMatch ^/marker$ /marker/
+RedirectMatch ^/marker-api$ /marker-api/
+
+<Location /marker/>
+    <RequireAny>
+        Require ip 127.0.0.0/8
+        Require ip ::1
+        Require ip 192.168.0.0/16
+        Require ip 10.0.0.0/8
+        Require ip 100.64.0.0/10
+    </RequireAny>
+</Location>
+
+<Location /marker-api/>
+    <RequireAny>
+        Require ip 127.0.0.0/8
+        Require ip ::1
+        Require ip 192.168.0.0/16
+        Require ip 10.0.0.0/8
+        Require ip 100.64.0.0/10
+    </RequireAny>
+</Location>
+
+# UI JS uses root-absolute fetch("/convert") and fetch("/jobs/…").
+<Location /marker>
+    AddOutputFilterByType INFLATE;SUBSTITUTE;DEFLATE text/html
+    Substitute 's|fetch("/convert"|fetch("/marker/convert"|n'
+    Substitute 's|fetch("/jobs/|fetch("/marker/jobs/|n'
+</Location>
+
+ProxyPass        "/marker-api/" "http://127.0.0.1:8001/" timeout=21600
+ProxyPassReverse "/marker-api/" "http://127.0.0.1:8001/"
+
+ProxyPass        "/marker/" "http://127.0.0.1:8002/" timeout=21600
+ProxyPassReverse "/marker/" "http://127.0.0.1:8002/"
