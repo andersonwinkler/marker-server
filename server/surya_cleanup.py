@@ -16,8 +16,8 @@ import time
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-# Only kill process PIDs whose cmdline looks like an OCR server.
-_PROCESS_CMDLINE_HINTS = ('llama-server', 'vllm', 'surya')
+# Only kill process PIDs whose cmdline looks like an OCR inference server.
+_PROCESS_CMDLINE_HINTS = ('llama-server', 'vllm')
 
 
 def _candidate_dirs() -> List[Path]:
@@ -55,12 +55,7 @@ def _pid_looks_like_ocr(pid: int) -> bool:
     if text is None:
         return False
     lower = text.lower()
-    if any(h in lower for h in _PROCESS_CMDLINE_HINTS):
-        return True
-    # Self-test helpers embed this marker in their -c payload.
-    if os.environ.get('MARKER_TEST_WORKER') == '1' and 'llama-server' in lower:
-        return True
-    return False
+    return any(h in lower for h in _PROCESS_CMDLINE_HINTS)
 
 
 def _pid_exists(pid: int) -> bool:
@@ -110,22 +105,24 @@ def _stop_process(pid: int) -> bool:
 
 
 def _stop_docker(name: str) -> bool:
-    acted = False
+    stopped = False
     try:
         r = subprocess.run(
             ['docker', 'stop', name],
             check=False, capture_output=True, timeout=60)
-        acted = r.returncode == 0 or acted
+        if r.returncode == 0:
+            stopped = True
     except Exception:
         pass
     try:
-        subprocess.run(
+        r = subprocess.run(
             ['docker', 'rm', '-f', name],
             check=False, capture_output=True, timeout=30)
-        acted = True
+        if r.returncode == 0:
+            stopped = True
     except Exception:
         pass
-    return acted
+    return stopped
 
 
 def _cleanup_sentinel(path: Path) -> Tuple[bool, bool]:

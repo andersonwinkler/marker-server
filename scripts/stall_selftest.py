@@ -8,8 +8,12 @@ import tempfile
 import time
 from pathlib import Path
 
-# Isolate Surya cache so we never touch a real OCR sentinel under the user home.
-_TMP_HOME = tempfile.mkdtemp(prefix='marker-stall-home-')
+# Isolate Surya cache. Spawn re-imports this module as __mp_main__, so only
+# create a new temp home if the parent has not already chosen one.
+_TMP_HOME = os.environ.get('MARKER_STALL_TMP_HOME')
+if not _TMP_HOME:
+    _TMP_HOME = tempfile.mkdtemp(prefix='marker-stall-home-')
+    os.environ['MARKER_STALL_TMP_HOME'] = _TMP_HOME
 os.environ['HOME'] = _TMP_HOME
 os.environ['XDG_CACHE_HOME'] = os.path.join(_TMP_HOME, 'xdg-cache')
 os.environ['MARKER_SURYA_CACHE_DIR'] = os.path.join(
@@ -20,8 +24,6 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SERVER = os.path.join(_ROOT, 'server')
 if _SERVER not in sys.path:
     sys.path.insert(0, _SERVER)
-
-import jobs as J  # noqa: E402
 
 
 def _helper_alive(pid: int) -> bool:
@@ -45,6 +47,8 @@ def _wait_status(mgr, job_id, want, timeout=20.0):
 
 
 def main():
+    import jobs as J
+
     upload = tempfile.mkdtemp()
     path = os.path.join(upload, 'x.pdf')
     with open(path, 'w', encoding='utf-8') as fp:
@@ -69,6 +73,7 @@ def main():
     mgr = J.JobManager(
         upload_dir=upload, job_ttl_seconds=60, progress_stall_seconds=1,
         worker_ready_timeout=30)
+
     cache_dir = Path(os.environ['MARKER_SURYA_CACHE_DIR'])
     cache_dir.mkdir(parents=True, exist_ok=True)
     sentinel = cache_dir / 'vllm_server.json'
@@ -82,11 +87,14 @@ def main():
 
     # Capture helper PID from progress stage (chunk+helper:<pid>) before stall.
     helper_pid = None
+    sentinel_seen = False
     for _ in range(100):
         a = mgr.get(ja.job_id)
         stage = (a.stage or '') if a else ''
         if stage.startswith('chunk+helper:'):
             helper_pid = int(stage.split(':', 1)[1])
+            if sentinel.is_file():
+                sentinel_seen = True
             break
         if a and a.status in ('failed', 'cancelled', 'done'):
             break
@@ -95,6 +103,8 @@ def main():
         f'hang job should report helper pid in stage, got '
         f'{getattr(mgr.get(ja.job_id), "stage", None)}/'
         f'{getattr(mgr.get(ja.job_id), "error", None)}')
+    assert sentinel_seen, (
+        'OCR sentinel missing in shared cache dir — parent/worker HOME disagree')
     assert _helper_alive(helper_pid), 'OCR helper should be running during hang'
 
     t0 = time.time()
@@ -117,12 +127,8 @@ def main():
 
     time.sleep(0.3)
     assert not sentinel.is_file(), 'OCR sentinel should be removed on stall'
-    if _helper_alive(helper_pid):
-        # Some sandboxes allow os.kill() but ignore the signal; the sentinel
-        # removal is what stops the next worker from reusing a hung server.
-        print('ocr sentinel removed (helper signal ignored in this environment)')
-    else:
-        print('ocr helper cleanup ok')
+    assert not _helper_alive(helper_pid), 'OCR helper should be killed on stall'
+    print('ocr helper cleanup ok')
 
     jc = mgr.submit(path, {'_test_mode': 'hang'}, delete_filepath=False)
     for _ in range(50):
