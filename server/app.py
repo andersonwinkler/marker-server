@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
+from api_auth import apply_openapi_security, enforce_api_key
 from config import (
     apply_runtime_env, chunking_defaults_from_env, config_path,
     llm_defaults_from_env, marker_home, marker_python, runtime_settings,
@@ -94,7 +95,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title='Marker API',
-    description='PDF/document conversion with job progress and page chunking.',
+    description=(
+        'PDF/document conversion with job progress and page chunking. '
+        'When auth.api_key is set, send Authorization: Bearer <key>.'),
     lifespan=lifespan,
     # Custom /docs and /redoc below use relative openapi.json (proxy-friendly).
     docs_url=None,
@@ -111,6 +114,35 @@ async def limit_upload_content_length(request: Request, call_next):
             return JSONResponse(
                 status_code=exc.status_code, content={'detail': exc.detail})
     return await call_next(request)
+
+
+# Registered last so it runs first (reject unauthenticated before body work).
+@app.middleware('http')
+async def require_api_key(request: Request, call_next):
+    return await enforce_api_key(request, call_next)
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    ver_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'VERSION')
+    try:
+        with open(ver_path, encoding='utf-8') as fp:
+            version = fp.read().strip() or '0.1.0'
+    except OSError:
+        version = '0.1.0'
+    schema = get_openapi(
+        title=app.title,
+        version=version,
+        description=app.description,
+        routes=app.routes)
+    app.openapi_schema = apply_openapi_security(schema)
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 
 @app.get('/')

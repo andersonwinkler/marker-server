@@ -210,3 +210,9 @@ def stop_surya_inference_servers(
             if did_stop:
                 stopped += 1
     return stopped
+
+
+if __name__ == '__main__':
+    # Used by uninstall.sh (and operators) to stop keep-alive OCR servers.
+    count = stop_surya_inference_servers()
+    print(count)

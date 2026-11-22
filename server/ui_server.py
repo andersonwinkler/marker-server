@@ -9,9 +9,20 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
+from api_auth import enforce_ui_api_key
+from config import api_key
 from http_limits import max_upload_bytes, reject_oversized_content_length
 
 MARKER_API = os.getenv('MARKER_API_BASE', 'http://127.0.0.1:8001').rstrip('/')
+
+
+def _api_headers(extra=None):
+    '''Forward the server API key after the UI itself has authenticated.'''
+    headers = dict(extra or {})
+    key = api_key()
+    if key:
+        headers['Authorization'] = f'Bearer {key}'
+    return headers
 
 PAGE = '''<!DOCTYPE html>
 <html lang="en">
@@ -342,6 +353,11 @@ document.getElementById("savezip").addEventListener("click", () => {
 app = FastAPI()
 
 
+@app.middleware('http')
+async def require_ui_api_key(request: Request, call_next):
+    return await enforce_ui_api_key(request, call_next)
+
+
 @app.get('/')
 def index():
     return HTMLResponse(PAGE)
@@ -365,7 +381,7 @@ async def convert(request: Request):
                     detail=f'Upload exceeds max_upload_bytes ({max_bytes})')
             yield chunk
 
-    headers = {'content-type': content_type}
+    headers = _api_headers({'content-type': content_type})
     cl = request.headers.get('content-length')
     if cl:
         headers['content-length'] = cl
@@ -388,7 +404,9 @@ async def convert(request: Request):
 async def jobs_proxy(job_id: str):
     timeout = httpx.Timeout(30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        upstream = await client.get(f'{MARKER_API}/marker/jobs/{job_id}')
+        upstream = await client.get(
+            f'{MARKER_API}/marker/jobs/{job_id}',
+            headers=_api_headers())
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
@@ -399,7 +417,9 @@ async def jobs_proxy(job_id: str):
 async def jobs_result_proxy(job_id: str):
     timeout = httpx.Timeout(120.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        upstream = await client.get(f'{MARKER_API}/marker/jobs/{job_id}/result')
+        upstream = await client.get(
+            f'{MARKER_API}/marker/jobs/{job_id}/result',
+            headers=_api_headers())
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,

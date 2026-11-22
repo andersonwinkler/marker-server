@@ -34,6 +34,7 @@ if [[ "${EUID}" -ne 0 ]]; then
     MARKER_OPENAI_BASE_URL="${MARKER_OPENAI_BASE_URL:-}" \
     MARKER_OPENAI_MODEL="${MARKER_OPENAI_MODEL:-}" \
     MARKER_OPENAI_API_KEY="${MARKER_OPENAI_API_KEY:-}" \
+    MARKER_SERVER_API_KEY="${MARKER_SERVER_API_KEY:-}" \
     LLAMA_CPP_BINARY="${LLAMA_CPP_BINARY:-}" \
     bash "$0" "$@"
 fi
@@ -68,6 +69,32 @@ chmod 755 "$PREFIX/bin/"*.sh
 chmod 644 "$PREFIX/server/"*.py
 
 CONFIG="$PREFIX/config.json"
+ensure_api_key() {
+  # Fill auth.api_key when missing/empty (new install or upgrade).
+  "$PYTHON_BIN" - "$1" "${MARKER_SERVER_API_KEY:-}" <<'PY'
+import json, secrets, sys
+path, override = sys.argv[1:3]
+with open(path, encoding='utf-8') as fp:
+    data = json.load(fp)
+auth = data.setdefault('auth', {})
+changed = False
+if override.strip():
+    if auth.get('api_key') != override:
+        auth['api_key'] = override
+        changed = True
+elif not str(auth.get('api_key') or '').strip():
+    auth['api_key'] = secrets.token_urlsafe(32)
+    changed = True
+if changed:
+    with open(path, 'w', encoding='utf-8') as fp:
+        json.dump(data, fp, indent=2)
+        fp.write('\n')
+    print('updated')
+else:
+    print('unchanged')
+PY
+}
+
 if [[ ! -f "$CONFIG" ]]; then
   cp "$ROOT/config.example.json" "$CONFIG"
   "$PYTHON_BIN" - "$CONFIG" "$MARKER_HOME" "${LLAMA_CPP_BINARY:-}" \
@@ -88,13 +115,19 @@ if model:
     llm['openai_model'] = model
 if key:
     llm['openai_api_key'] = key
+data.setdefault('auth', {})
 with open(path, 'w', encoding='utf-8') as fp:
     json.dump(data, fp, indent=2)
     fp.write('\n')
 PY
-  echo "Wrote $CONFIG"
+  ensure_api_key "$CONFIG" >/dev/null
+  echo "Wrote $CONFIG (auth.api_key set; keep config mode 640)"
 else
   echo "Keeping existing $CONFIG"
+  KEY_STATE="$(ensure_api_key "$CONFIG")"
+  if [[ "$KEY_STATE" == "updated" ]]; then
+    echo "  Set auth.api_key (was missing/empty, or MARKER_SERVER_API_KEY override)"
+  fi
 fi
 cp -f "$ROOT/config.example.json" "$PREFIX/config.example.json"
 cp -f "$ROOT/README.md" "$PREFIX/README.md"
@@ -130,18 +163,23 @@ chown root:"$MARKER_USER" "$CONFIG"
 chmod 640 "$CONFIG"
 
 if [[ -d "$MARKER_HOME" ]]; then
-  # Do NOT chmod a+rX the whole tree (leaks HF tokens etc.).
-  # Undo world-readable bits from older installers (5e21f56 used a+rX).
-  chmod -R o-rwx "$MARKER_HOME" 2>/dev/null || true
+  # Undo older installers that ran chmod -R o-rwx on the whole Marker tree
+  # (CLI became unusable for everyone except root/marker). Skip cache/hf.
+  find "$MARKER_HOME" \
+    \( -path "$MARKER_HOME/cache" -o -path "$MARKER_HOME/hf" \) -prune \
+    -o -exec chmod o+rX {} + 2>/dev/null || true
   # Grant the service user read/execute via ACL (+ default ACL for new files),
   # or group fallback when setfacl is unavailable.
   if command -v setfacl >/dev/null 2>&1; then
     setfacl -R -m "u:${MARKER_USER}:rX" "$MARKER_HOME" || true
     find "$MARKER_HOME" -type d -exec setfacl -d -m "u:${MARKER_USER}:rX" {} + 2>/dev/null || true
+    # New files under marker.home should stay other-readable (not other::---).
+    setfacl -d -m 'o::rX' "$MARKER_HOME" 2>/dev/null || true
   else
     chgrp -R "$MARKER_USER" "$MARKER_HOME" || true
     chmod -R g+rX "$MARKER_HOME" || true
   fi
+  # Secrets live under cache/ and hf/ — lock those only.
   mkdir -p "$MARKER_HOME/cache" "$MARKER_HOME/hf"
   chown -R "$MARKER_USER:$MARKER_USER" "$MARKER_HOME/cache" "$MARKER_HOME/hf"
   chmod 700 "$MARKER_HOME/cache" "$MARKER_HOME/hf"
@@ -194,10 +232,39 @@ sed -e "s|/opt/marker-server/0.1.0|$PREFIX|g" \
 ln -sfn "$PREFIX" /opt/marker-server/current
 systemctl daemon-reload
 
+AUTH_STATE="$("$PYTHON_BIN" - "$CONFIG" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as fp:
+    data = json.load(fp)
+auth = data.get('auth') or {}
+key = str(auth.get('api_key') or '').strip()
+ui = auth.get('ui_password')
+ui_set = ui is not None and str(ui).strip() != ''
+if key:
+    print('api')
+elif ui_set:
+    print('ui_only')
+else:
+    print('none')
+PY
+)"
+
 echo
 echo "Installed marker-server $VERSION"
 echo "  Prefix:  $PREFIX"
 echo "  Config:  $CONFIG (root:$MARKER_USER mode 640)"
+if [[ "$AUTH_STATE" == "api" ]]; then
+  echo "  Auth:    API key enabled (config.json → auth.api_key)"
+  echo "           Clients: Authorization: Bearer <key>"
+  echo "           UI: HTTP Basic (any user, password = auth.ui_password or api_key)"
+  echo "           Off localhost: serve over HTTPS (Basic is base64 only)"
+  echo "           Show key: sudo python3 -c \"import json;print(json.load(open('$CONFIG'))['auth']['api_key'])\""
+elif [[ "$AUTH_STATE" == "ui_only" ]]; then
+  echo "  Auth:    WARNING — auth.api_key is empty; API is unauthenticated"
+  echo "           UI is protected by auth.ui_password only"
+else
+  echo "  Auth:    WARNING — auth.api_key is empty; API and UI are unauthenticated"
+fi
 echo "  User:    $MARKER_USER (home $MARKER_STATE_DIR)"
 echo "  Marker:  marker.home → $MARKER_HOME"
 if [[ ! -x "$MARKER_HOME/venv/bin/python" ]]; then

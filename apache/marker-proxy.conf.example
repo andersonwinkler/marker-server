@@ -17,6 +17,8 @@ LimitRequestBody 536870912
 RedirectMatch ^/marker$ /marker/
 RedirectMatch ^/marker-api$ /marker-api/
 
+# UI holds the server API key after login — keep it on trusted networks (and/or
+# add AuthType Basic here). marker-server itself also challenges for auth.api_key.
 <Location /marker/>
     LimitRequestBody 536870912
     <RequireAny>

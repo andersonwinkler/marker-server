@@ -39,7 +39,7 @@ def _candidates():
 
 def config_path():
     for path in _candidates():
-        if path and os.path.isfile(path):
+        if path and os.path.isfile(path) and os.access(path, os.R_OK):
             return path
     return None
 
@@ -259,6 +259,34 @@ def chunking_defaults_from_env():
             'table_llm_fallback', 'MARKER_TABLE_LLM_FALLBACK', True),
         'seam_polish': _bool('seam_polish', 'MARKER_SEAM_POLISH', True),
         'seam_chars': _int('seam_chars', 'MARKER_SEAM_CHARS', 600)}
+
+
+def api_key():
+    '''Bearer token required by the HTTP API when non-empty.
+
+    MARKER_SERVER_API_KEY overrides auth.api_key when set.
+    Empty / missing disables API authentication (not recommended).
+    '''
+    env = os.getenv('MARKER_SERVER_API_KEY')
+    if env is not None and str(env).strip() != '':
+        return str(env).strip()
+    key = _section('auth').get('api_key')
+    return str(key).strip() if key else ''
+
+
+def ui_password():
+    '''Password for the browser UI (HTTP Basic / Bearer).
+
+    Prefer auth.ui_password (or MARKER_SERVER_UI_PASSWORD). Falls back to
+    api_key() so a single secret still works. Empty disables UI auth.
+    '''
+    env = os.getenv('MARKER_SERVER_UI_PASSWORD')
+    if env is not None and str(env).strip() != '':
+        return str(env).strip()
+    pwd = _section('auth').get('ui_password')
+    if pwd is not None and str(pwd).strip() != '':
+        return str(pwd).strip()
+    return api_key()
 
 
 def upload_dir():

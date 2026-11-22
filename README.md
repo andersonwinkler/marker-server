@@ -94,10 +94,10 @@ Uninstall (leaves Marker itself alone):
 
 `install.sh`:
 
-- Creates system user `marker` (override with `MARKER_USER=…`) with home `/var/lib/marker-server`
+- Creates system user `marker` (override with `MARKER_USER=…`) with home `/var/lib/marker-server`; generates `auth.api_key` on first install (or use `MARKER_SERVER_API_KEY`)
 - Adds `video` / `render` for GPU nodes; adds `docker` only for vLLM (or `MARKER_DOCKER=1`) — docker membership is effectively root
 - Installs code as **root-owned**; only `uploads/` is writable by `marker`; `config.json` is `root:marker` mode `640`
-- Grants `marker` read access to `marker.home` via ACL + **default ACL** on directories (so later pip/GGUF files stay readable), strips world bits from older `a+rX` installs, and keeps `cache/` + `hf/` mode `700` owned by `marker`
+- Grants `marker` read access to `marker.home` via ACL + **default ACL** on directories (so later pip/GGUF files stay readable), and keeps only `cache/` + `hf/` mode `700` owned by `marker` (CLI remains usable by other local users)
 - Installs thin HTTP deps into **Marker’s venv** and a small local UI venv; systemd units use `User=marker`
 
 API: `http://127.0.0.1:8001` · UI: `http://127.0.0.1:8002` · OpenAPI: `/docs`
@@ -116,6 +116,13 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 |-----|---------|
 | `home` | Absolute vanilla Marker prefix (required) |
 | `python` | Optional interpreter override; default `home/venv/bin/python` |
+
+### `auth`
+
+| Key | Meaning |
+|-----|---------|
+| `api_key` | When non-empty, API routes (except `/`, `/docs`, `/redoc`, `/openapi.json`) require `Authorization: Bearer <api_key>` (Basic with that password also works). Override with `MARKER_SERVER_API_KEY`. Install generates a key on first install **and** on upgrade if missing/empty |
+| `ui_password` | Optional separate UI login (HTTP Basic / Bearer). `null`/omit → fall back to `api_key`. Does **not** protect the API by itself. Override with `MARKER_SERVER_UI_PASSWORD` |
 
 ### `runtime`
 
@@ -252,10 +259,13 @@ cp config.example.json config.json
 
 - systemd runs API and UI as **`marker`** (not root). Code under `/opt/marker-server/<ver>/` is root-owned; the service only writes `uploads/` and Marker `cache/`/`hf/`.
 - **Docker ≈ root:** a **default install** (`surya.inference_backend` unset → vLLM) still adds `marker` to the `docker` group and prints a warning. That undoes much of the privilege drop. Choose deliberately: keep vLLM, or set `surya.inference_backend=llamacpp` / `MARKER_DOCKER=0` to skip docker.
-- The API has **no built-in authentication**. Default bind is `127.0.0.1`. If you reverse-proxy it, restrict by network (see the Apache example) or put your own auth in front.
-- LLM credentials live only in server `config.json` (`root:marker` mode `640`). Never commit that file; clients cannot supply the endpoint or key.
+- **API key:** set `auth.api_key` (install generates one, including on upgrade if empty). API clients send `Authorization: Bearer <key>`. The UI uses `auth.ui_password` if set, otherwise the same API key (browser Basic-auth prompt, or Bearer). Default bind is `127.0.0.1`. Off localhost, put **HTTPS** (or equivalent TLS) in front — Basic auth is only base64.
+- `auth.ui_password` only protects the UI. An empty `auth.api_key` leaves the **API unauthenticated** even if `ui_password` is set. Empty both → neither is authenticated (not recommended).
+- Optionally set a distinct `auth.ui_password` so a browser-saved UI login is not the full API token.
+- Marker under `marker.home` stays readable for local CLI use; only `cache/` and `hf/` are mode `700` owned by `marker` (HF tokens). The service user gets ACL `rX` on the tree.
+- LLM credentials and `auth.api_key` live only in server `config.json` (`root:marker` mode `640`). Never commit that file; clients cannot supply the LLM endpoint or key.
 - Uploaded filenames are sanitized (basename only). Only files under `upload_dir` created by `/marker/upload` are deleted after a job; `POST /marker` never deletes its `filepath` and is disabled by default (`allowed_input_dirs: []`).
-- Uploads are capped by `max_upload_bytes` (and `LimitRequestBody` in the Apache example). Prefer keeping the service off the public internet unless you add auth.
+- Uploads are capped by `max_upload_bytes` (and `LimitRequestBody` in the Apache example).
 - HTTP / reverse-proxy timeouts cover **upload and result transfer only**. Conversion jobs are async; a **progress stall** fails the job, kills the conversion worker, and stops Surya’s OCR server so the next job does not reuse a hung inference backend (models reload on the next job).
 
 ## License

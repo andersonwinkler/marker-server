@@ -3,6 +3,10 @@
     "home": "/opt/marker/2.0.0",
     "python": null
   },
+  "auth": {
+    "api_key": "",
+    "ui_password": null
+  },
   "runtime": {
     "cuda_visible_devices": "0",
     "torch_device": "cuda",

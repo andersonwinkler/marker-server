@@ -6,6 +6,20 @@ Interactive OpenAPI: `GET /docs` · ReDoc: `GET /redoc`
 
 All conversion work is **asynchronous**: submit a job, poll progress, fetch the result. Jobs run **one at a time** (FIFO). Vision LLM URL/key/model are **server-only** (`config.json`); clients never send them.
 
+### Authentication
+
+When `auth.api_key` is set in `config.json` (or `MARKER_SERVER_API_KEY` is set), protect every route except `/`, `/docs`, `/redoc`, and `/openapi.json`:
+
+```http
+Authorization: Bearer <auth.api_key>
+```
+
+Missing or wrong key → `401` with `WWW-Authenticate: Bearer`. In Swagger UI, use **Authorize**.
+
+The browser UI on `:8002` requires `auth.ui_password` if set, otherwise the same `auth.api_key` (HTTP Basic: any username, password = that secret, or Bearer). After you authenticate to the UI, it forwards `Authorization: Bearer <auth.api_key>` to the API — so the UI is not an unauthenticated back door. Off localhost, terminate TLS in front of both ports (Basic auth is only base64).
+
+`auth.ui_password` alone does **not** protect the API: with an empty `auth.api_key`, `:8001` stays open.
+
 ---
 
 ## Overview
@@ -441,7 +455,7 @@ blocks = data.get('blocks') or []
 
 ## UI proxy paths
 
-The browser UI (`:8002`) does not redefine the API; it proxies:
+The browser UI (`:8002`) does not redefine the API; it proxies (and requires `auth.api_key` when configured):
 
 | UI path | API path |
 |---------|----------|
@@ -453,7 +467,7 @@ The browser UI (`:8002`) does not redefine the API; it proxies:
 
 ## Notes for integrators
 
-1. **Auth:** this API has no built-in authentication. Keep it on localhost or protect it at the reverse proxy.
+1. **Auth:** send `Authorization: Bearer <auth.api_key>` when a key is configured. Keep the service on localhost and/or protect it at the reverse proxy as well.
 2. **Timeouts:** conversion jobs have **no absolute wall-clock limit**. They fail if no progress update arrives for `runtime.progress_stall_seconds` (default 7200); the conversion **subprocess is killed** and Surya’s detached OCR server is stopped (so the next worker does not reuse a hung vLLM/llama-server). Marker models reload on the next job. HTTP timeouts on clients/proxies should cover upload/result transfer and status polls only — not total conversion time. Single-pass jobs only emit progress at start/end, so the stall timer is effectively a per-pass limit — raise it for very long one-shot converts. Worker model-load wait is `runtime.worker_ready_seconds` (default 1800); the scheduler thread loads models at startup, and jobs submitted during load stay queued (no parallel warm-start reader).
 3. **Concurrency:** submitting many jobs is fine; they queue. Only one runs. Don’t also run Marker CLI on the same GPU during a heavy job.
 4. **Chunking + `page_range`:** a non-empty `page_range` turns off auto page-block splitting for that request. Any request that includes HTML (`profile=html` or `include_html=true`) always uses a single Marker pass (no HTML stitcher).
@@ -461,4 +475,4 @@ The browser UI (`:8002`) does not redefine the API; it proxies:
 6. **`POST /marker` filepath:** converts a server-local path and **never** deletes it. Default `allowed_input_dirs: []` disables path convert (upload only). Set dirs or `null` (any readable path) to enable. Only uploads under `upload_dir` are removed after the job.
 7. **Upload size:** capped by `runtime.max_upload_bytes` (default 512 MiB); also set `LimitRequestBody` on the reverse proxy. Non-PDFs / unreadable page counts skip chunking and always use a single pass.
 8. **Service user:** systemd units run as `marker` (not root).
-9. **Secrets:** rotate keys in server `config.json` and restart `marker-server-api`; never put keys in client requests.
+9. **Secrets:** rotate `auth.api_key` / `auth.ui_password` / LLM keys in server `config.json` and restart `marker-server-api` and `marker-server-ui`. Never put LLM keys in client requests.

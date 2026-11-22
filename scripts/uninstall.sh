@@ -7,6 +7,10 @@
 #   sudo ./scripts/uninstall.sh --all      # remove every /opt/marker-server/* version
 #   sudo ./scripts/uninstall.sh --purge    # also drop user, state dir, and Marker ACLs
 #   sudo ./scripts/uninstall.sh --all --purge
+#
+# Notes:
+#   --all always targets /opt/marker-server (not a custom INSTALL_PREFIX).
+#   A custom INSTALL_PREFIX must sit under /opt/marker-server/ and contain VERSION.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,7 +27,7 @@ for arg in "$@"; do
     --all) REMOVE_ALL=1 ;;
     --purge) PURGE=1 ;;
     -h|--help)
-      sed -n '2,10p' "$0"
+      sed -n '2,14p' "$0"
       exit 0
       ;;
     *)
@@ -67,9 +71,78 @@ PY
   echo ""
 }
 
+assert_safe_prefix() {
+  local p
+  # Resolve .. and symlinks before the allowlist check.
+  p="$(realpath -m -- "$1")"
+  case "$p" in
+    /opt/marker-server/*) ;;
+    *)
+      echo "Refusing to delete INSTALL_PREFIX outside /opt/marker-server/: $p" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$p" == "/opt/marker-server" || "$p" == "/opt/marker-server/" ]]; then
+    echo "Refusing to delete the parent /opt/marker-server (use --all)." >&2
+    exit 1
+  fi
+  if [[ ! -f "$p/VERSION" ]]; then
+    echo "Refusing to delete $p (no VERSION file — not a marker-server prefix)." >&2
+    exit 1
+  fi
+}
+
+stop_ocr_servers() {
+  local cleanup=""
+  for cleanup in \
+    "$PREFIX/server/surya_cleanup.py" \
+    /opt/marker-server/current/server/surya_cleanup.py \
+    "$ROOT/server/surya_cleanup.py"
+  do
+    [[ -f "$cleanup" ]] || continue
+    echo "==> Stopping Surya OCR keep-alive servers (via $cleanup)"
+    if id -u "$MARKER_USER" >/dev/null 2>&1; then
+      # Run as the service user so HOME points at state and docker group applies.
+      sudo -u "$MARKER_USER" env HOME="$MARKER_STATE_DIR" \
+        XDG_CACHE_HOME="$MARKER_STATE_DIR/.cache" \
+        python3 "$cleanup" || true
+    else
+      HOME="$MARKER_STATE_DIR" python3 "$cleanup" || true
+    fi
+    return 0
+  done
+  echo "==> (no surya_cleanup.py found; OCR keep-alive may still be running)"
+}
+
+stop_user_processes() {
+  if ! id -u "$MARKER_USER" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! pgrep -u "$MARKER_USER" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "==> Stopping remaining processes for $MARKER_USER"
+  pgrep -u "$MARKER_USER" -a || true
+  pkill -u "$MARKER_USER" 2>/dev/null || true
+  sleep 1
+  if pgrep -u "$MARKER_USER" >/dev/null 2>&1; then
+    pkill -9 -u "$MARKER_USER" 2>/dev/null || true
+    sleep 1
+  fi
+  if pgrep -u "$MARKER_USER" >/dev/null 2>&1; then
+    echo "WARNING: processes still running for $MARKER_USER:" >&2
+    pgrep -u "$MARKER_USER" -a >&2 || true
+  fi
+}
+
+MARKER_HOME="$(resolve_marker_home)"
+
 echo "==> Stopping marker-server services"
 systemctl stop marker-server-api.service marker-server-ui.service 2>/dev/null || true
 systemctl disable marker-server-api.service marker-server-ui.service 2>/dev/null || true
+
+# Before deleting PREFIX / state: stop detached OCR servers while sentinels exist.
+stop_ocr_servers
 
 echo "==> Removing systemd units"
 rm -f /etc/systemd/system/marker-server-api.service \
@@ -77,12 +150,15 @@ rm -f /etc/systemd/system/marker-server-api.service \
 systemctl daemon-reload
 systemctl reset-failed marker-server-api.service marker-server-ui.service 2>/dev/null || true
 
-MARKER_HOME="$(resolve_marker_home)"
-
 if [[ "$REMOVE_ALL" -eq 1 ]]; then
   echo "==> Removing all installs under /opt/marker-server"
+  if [[ -n "${INSTALL_PREFIX:-}" && "$PREFIX" != /opt/marker-server/* ]]; then
+    echo "NOTE: --all removes /opt/marker-server only; custom INSTALL_PREFIX=$PREFIX is not deleted."
+  fi
   rm -rf /opt/marker-server
 else
+  assert_safe_prefix "$PREFIX"
+  PREFIX="$(realpath -m -- "$PREFIX")"
   echo "==> Removing install prefix $PREFIX"
   rm -rf "$PREFIX"
   if [[ -L /opt/marker-server/current ]]; then
@@ -97,22 +173,37 @@ else
 fi
 
 if [[ "$PURGE" -eq 1 ]]; then
-  echo "==> Purging state dir $MARKER_STATE_DIR"
-  rm -rf "$MARKER_STATE_DIR"
+  stop_user_processes
 
   if [[ -n "$MARKER_HOME" && -d "$MARKER_HOME" ]]; then
-    echo "==> Removing ACL entries for $MARKER_USER on $MARKER_HOME"
+    echo "==> Reclaiming Marker cache/hf ownership and stripping $MARKER_USER ACLs"
+    if [[ -d "$MARKER_HOME/cache" ]]; then
+      chown -R root:root "$MARKER_HOME/cache" || true
+    fi
+    if [[ -d "$MARKER_HOME/hf" ]]; then
+      chown -R root:root "$MARKER_HOME/hf" || true
+    fi
+    # Undo group fallback from installs without setfacl (only files still
+    # grouped as the service user — leave other admin groups alone).
+    find "$MARKER_HOME" -group "$MARKER_USER" -exec chgrp root {} + 2>/dev/null || true
     if command -v setfacl >/dev/null 2>&1; then
       setfacl -R -x "u:${MARKER_USER}" "$MARKER_HOME" 2>/dev/null || true
       find "$MARKER_HOME" -type d -exec setfacl -d -x "u:${MARKER_USER}" {} + 2>/dev/null || true
     fi
   else
-    echo "==> (no Marker home found to strip ACLs from)"
+    echo "==> (no Marker home found to reclaim)"
   fi
+
+  echo "==> Purging state dir $MARKER_STATE_DIR"
+  rm -rf "$MARKER_STATE_DIR"
 
   if id -u "$MARKER_USER" >/dev/null 2>&1; then
     echo "==> Removing system user $MARKER_USER"
-    userdel "$MARKER_USER" 2>/dev/null || userdel -r "$MARKER_USER" 2>/dev/null || true
+    if ! userdel "$MARKER_USER"; then
+      echo "WARNING: userdel $MARKER_USER failed; leftover processes:" >&2
+      pgrep -u "$MARKER_USER" -a >&2 || true
+      exit 1
+    fi
   fi
 else
   echo "==> Keeping user $MARKER_USER and state $MARKER_STATE_DIR (pass --purge to remove)"
