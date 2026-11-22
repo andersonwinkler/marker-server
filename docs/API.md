@@ -223,10 +223,12 @@ Job object.
 | HTTP | When |
 |------|------|
 | `400` | Missing `filepath` or file not found |
+| `403` | `filepath` not under `runtime.allowed_input_dirs` (empty list disables this endpoint) |
 
 ### Example
 
 ```bash
+# Requires runtime.allowed_input_dirs to include /data/inbox (default is []).
 curl -sS http://127.0.0.1:8001/marker \
   -H 'Content-Type: application/json' \
   -d '{"filepath":"/data/inbox/doc.pdf","profile":"dual","use_llm":true,"llm_scope":"tables_equations"}'
@@ -268,23 +270,24 @@ Conversion result (see [Result payload](#result-payload)) plus `job_id`.
 | `404` | `{ "detail": "Unknown job_id" }` | Bad id |
 | `409` | `{ "detail": "Job was cancelled" }` | Cancelled |
 | `409` | `{ "detail": { "message": "Job not finished", …job } }` | Still queued/running |
-| `410` | `{ "detail": { "message": "Result already fetched or expired", …job } }` | Result cleared after a prior fetch, or job TTL elapsed |
+| `410` | `{ "detail": { "message": "Result expired", …job } }` | Job TTL elapsed (or result was released) |
 | `500` | `{ "success": false, "error": "…", …job }` | Conversion failed |
 
-Finished jobs are kept in memory for `runtime.job_ttl_seconds` (default 3600). A successful `/result` fetch clears the heavy payload immediately; status metadata remains until TTL.
+Finished jobs (including the result payload) stay in memory until `runtime.job_ttl_seconds` (default 3600) or until `DELETE /marker/jobs/{id}`. `/result` is safe to retry after a dropped connection.
 
 ---
 
 ## `DELETE /marker/jobs/{job_id}`
 
-Request cancellation.
+Cancel an active job, or release a finished one early (free memory).
 
 - If `queued`: removed from queue → `cancelled` immediately
 - If `running`: best-effort. Cancel is checked in the progress callback between chunk windows / Marker passes. A **single-pass** job only reports progress before and after `run_marker()`, so cancel may take effect only after that conversion finishes. Marker itself has no mid-run stop API.
+- If `done` / `failed` / `cancelled`: job (and result) are dropped from memory immediately
 
 ### Response `200`
 
-Updated job object.
+Updated job object (for a purged finished job, this is a final snapshot).
 
 ### Errors
 
@@ -304,7 +307,7 @@ Updated job object.
 | `paginated` | yes | — | — | Markdown with page markers |
 | `rag` | — | — | yes | Flat chunks with page / bbox (RAG) |
 | `layout` | — | — | yes | Layout-oriented block tree flatten |
-| `html` | — | yes | — | HTML document (always single-pass; no page-block chunking) |
+| `html` | — | yes | — | HTML document (any HTML request forces single-pass; no page-block chunking) |
 | `dual` | yes | — | yes | Markdown + blocks (**two** Marker passes today) |
 
 ---
@@ -451,8 +454,9 @@ The browser UI (`:8002`) does not redefine the API; it proxies:
 1. **Auth:** this API has no built-in authentication. Keep it on localhost or protect it at the reverse proxy.
 2. **Timeouts:** do not use a short HTTP timeout on `/result` polling loops; use short timeouts on status polls and a long timeout only when fetching a large result body.
 3. **Concurrency:** submitting many jobs is fine; they queue. Only one runs. Don’t also run Marker CLI on the same GPU during a heavy job.
-4. **Chunking + `page_range`:** a non-empty `page_range` turns off auto page-block splitting for that request. HTML-only (`profile=html`) always uses a single Marker pass (no chunk stitcher).
+4. **Chunking + `page_range`:** a non-empty `page_range` turns off auto page-block splitting for that request. Any request that includes HTML (`profile=html` or `include_html=true`) always uses a single Marker pass (no HTML stitcher).
 5. **Dual / mixed deliveries:** `profile=dual` (or any request that asks for both markdown and blocks) currently runs Marker once per output format. Expect roughly 2× GPU time until a single-build multi-render path lands.
-6. **`POST /marker` filepath:** converts a server-local path and **never** deletes it. Only uploads under `upload_dir` are removed after the job.
-7. **Upload size:** capped by `runtime.max_upload_bytes` (default 512 MiB). Non-PDFs skip page-count probing and always use a single pass.
-8. **Secrets:** rotate keys in server `config.json` and restart `marker-server-api`; never put keys in client requests.
+6. **`POST /marker` filepath:** converts a server-local path and **never** deletes it. Default `allowed_input_dirs: []` disables path convert (upload only). Set dirs or `null` (any readable path) to enable. Only uploads under `upload_dir` are removed after the job.
+7. **Upload size:** capped by `runtime.max_upload_bytes` (default 512 MiB); also set `LimitRequestBody` on the reverse proxy. Non-PDFs / unreadable page counts skip chunking and always use a single pass.
+8. **Service user:** systemd units run as `marker` (not root).
+9. **Secrets:** rotate keys in server `config.json` and restart `marker-server-api`; never put keys in client requests.

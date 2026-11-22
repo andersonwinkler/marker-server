@@ -85,10 +85,11 @@ sudo systemctl enable --now marker-server-api.service marker-server-ui.service
 
 `install.sh`:
 
-- Copies `server/` and `bin/` under `/opt/marker-server/<VERSION>/`
-- Writes `config.json` from the example if missing (sets `marker.home`)
+- Creates a system user `marker` (override with `MARKER_USER=…`) and adds it to `video` / `render` / `docker` when those groups exist
+- Copies `server/` and `bin/` under `/opt/marker-server/<VERSION>/` owned by that user
+- Writes `config.json` from the example if missing (sets `marker.home`, mode `600`)
 - Installs thin HTTP deps (**fastapi**, **uvicorn**, …) into **Marker’s venv** (because `run-api.sh` execs that interpreter) and into a small local venv for UI fallback
-- Installs systemd units and symlinks `current`
+- Installs systemd units (`User=marker`) and symlinks `current`
 
 API: `http://127.0.0.1:8001` · UI: `http://127.0.0.1:8002` · OpenAPI: `/docs`
 
@@ -115,8 +116,9 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 | `torch_device` | Usually `cuda` |
 | `host` / `port` / `ui_port` | Bind addresses |
 | `upload_dir` | Temp uploads; default `<prefix>/uploads` |
-| `max_upload_bytes` | Reject larger uploads (default 512 MiB) |
-| `job_ttl_seconds` | Drop finished job metadata after this many seconds (default 3600); `/result` also clears the payload on first fetch |
+| `max_upload_bytes` | Reject larger uploads (default 512 MiB); also enforce at the reverse proxy |
+| `job_ttl_seconds` | Drop finished jobs (including results) after this many seconds (default 3600); `DELETE` releases early |
+| `allowed_input_dirs` | Allowlist for `POST /marker` paths. `[]` (default) disables path convert; `null` allows any path the service user can read |
 
 ### `surya`
 
@@ -198,7 +200,7 @@ When enabled, the server:
 
 Progress `total` is the number of planned chunks.
 
-**Limits:** `profile=html` always uses a single pass (no HTML stitcher). Cancel during a single-pass job is weak (see API docs). `dual` / markdown+blocks may run Marker twice.
+**Limits:** any HTML delivery always uses a single pass (no HTML stitcher). Cancel during a single-pass job is weak (see API docs). `dual` / markdown+blocks may run Marker twice.
 
 ---
 
@@ -237,10 +239,11 @@ cp config.example.json config.json
 
 ## Security notes
 
+- systemd runs API and UI as **`marker`** (not root). Override with `MARKER_USER` at install time.
 - The API has **no built-in authentication**. Default bind is `127.0.0.1`. If you reverse-proxy it, restrict by network (see the Apache example) or put your own auth in front.
 - LLM credentials live only in server `config.json` (mode `600` after install). Never commit that file; clients cannot supply the endpoint or key.
-- Uploaded filenames are sanitized (basename only). Only files under `upload_dir` created by `/marker/upload` are deleted after a job; `POST /marker` never deletes its `filepath`.
-- Uploads are capped by `max_upload_bytes`. Prefer keeping the service off the public internet unless you add auth.
+- Uploaded filenames are sanitized (basename only). Only files under `upload_dir` created by `/marker/upload` are deleted after a job; `POST /marker` never deletes its `filepath` and is disabled by default (`allowed_input_dirs: []`).
+- Uploads are capped by `max_upload_bytes` (and `LimitRequestBody` in the Apache example). Prefer keeping the service off the public internet unless you add auth.
 
 ## License
 

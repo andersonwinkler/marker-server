@@ -105,6 +105,14 @@ def runtime_settings():
     job_ttl = rt.get('job_ttl_seconds')
     if job_ttl is None:
         job_ttl = env_int('MARKER_JOB_TTL_SECONDS', 3600)
+    # null → any readable path; [] → POST /marker disabled; else allowlist.
+    allowed = rt.get('allowed_input_dirs', [])
+    if allowed is None:
+        allowed_dirs = None
+    elif isinstance(allowed, (list, tuple)):
+        allowed_dirs = [os.path.abspath(str(p)) for p in allowed if p]
+    else:
+        allowed_dirs = []
     return {
         'cuda_visible_devices': rt.get(
             'cuda_visible_devices',
@@ -116,6 +124,7 @@ def runtime_settings():
         'upload_dir': upload,
         'max_upload_bytes': int(max_upload),
         'job_ttl_seconds': int(job_ttl),
+        'allowed_input_dirs': allowed_dirs,
         'marker_home': home}
 
 

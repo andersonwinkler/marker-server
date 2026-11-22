@@ -38,12 +38,12 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
     want_blocks = bool(options.get('include_blocks'))
 
     # Page-block chunking needs a known page count and is markdown/blocks oriented.
-    # HTML-only delivery has no chunk stitcher — force a single Marker pass.
+    # Any HTML delivery has no chunk stitcher — force a single Marker pass.
     can_chunk = (
         n_pages is not None
         and should_chunk(n_pages, options)
         and not options.get('page_range')
-        and not (want_html and not want_md))
+        and not want_html)
     use_chunking = can_chunk
 
     if progress_cb:

@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 PREFIX="${INSTALL_PREFIX:-/opt/marker-server/$VERSION}"
 MARKER_HOME_DEFAULT="${MARKER_HOME:-/opt/marker/2.0.0}"
+MARKER_USER="${MARKER_USER:-marker}"
 if [[ -n "${PYTHON_BIN:-}" ]]; then
   PYTHON_BIN="$PYTHON_BIN"
 elif command -v python3.12 >/dev/null 2>&1; then
@@ -17,12 +18,15 @@ fi
 
 echo "Installing marker-server $VERSION → $PREFIX"
 echo "  (will point at Marker home: $MARKER_HOME_DEFAULT)"
+echo "  (service user: $MARKER_USER)"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Re-running with sudo…"
   exec sudo env \
     INSTALL_PREFIX="$PREFIX" \
     MARKER_HOME="$MARKER_HOME_DEFAULT" \
+    MARKER_USER="$MARKER_USER" \
+    PYTHON_BIN="$PYTHON_BIN" \
     MARKER_OPENAI_BASE_URL="${MARKER_OPENAI_BASE_URL:-}" \
     MARKER_OPENAI_MODEL="${MARKER_OPENAI_MODEL:-}" \
     MARKER_OPENAI_API_KEY="${MARKER_OPENAI_API_KEY:-}" \
@@ -31,7 +35,18 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 MARKER_HOME="${MARKER_HOME:-$MARKER_HOME_DEFAULT}"
-# Vision LLM is optional at install time — leave use_llm false until config is filled.
+
+# Dedicated unprivileged account for API + UI.
+if ! id -u "$MARKER_USER" >/dev/null 2>&1; then
+  useradd --system --home-dir "$PREFIX" --shell /sbin/nologin \
+    --comment 'marker-server' "$MARKER_USER"
+  echo "Created system user $MARKER_USER"
+fi
+for grp in video render docker; do
+  if getent group "$grp" >/dev/null 2>&1; then
+    usermod -aG "$grp" "$MARKER_USER" || true
+  fi
+done
 
 mkdir -p "$PREFIX"/{bin,server,uploads,jobs}
 cp -a "$ROOT/server/." "$PREFIX/server/"
@@ -91,11 +106,27 @@ fi
 source "$PREFIX/venv/bin/activate"
 pip install -U pip setuptools wheel
 pip install "${SERVER_DEPS[@]}"
+deactivate
+
+# Permissions: service user owns the prefix; can read Marker + write caches.
+chown -R "$MARKER_USER:$MARKER_USER" "$PREFIX"
+chmod 700 "$PREFIX/uploads" "$PREFIX/jobs"
+chmod 600 "$CONFIG"
+if [[ -d "$MARKER_HOME" ]]; then
+  # Readable tree; writable model/HF caches for downloads at runtime.
+  chmod -R a+rX "$MARKER_HOME" || true
+  mkdir -p "$MARKER_HOME/cache" "$MARKER_HOME/hf"
+  chown -R "$MARKER_USER:$MARKER_USER" "$MARKER_HOME/cache" "$MARKER_HOME/hf" || true
+fi
 
 UNIT_DIR=/etc/systemd/system
-sed "s|/opt/marker-server/0.1.0|$PREFIX|g" \
+sed -e "s|/opt/marker-server/0.1.0|$PREFIX|g" \
+    -e "s|^User=marker$|User=$MARKER_USER|" \
+    -e "s|^Group=marker$|Group=$MARKER_USER|" \
   "$ROOT/systemd/marker-server-api.service" > "$UNIT_DIR/marker-server-api.service"
-sed "s|/opt/marker-server/0.1.0|$PREFIX|g" \
+sed -e "s|/opt/marker-server/0.1.0|$PREFIX|g" \
+    -e "s|^User=marker$|User=$MARKER_USER|" \
+    -e "s|^Group=marker$|Group=$MARKER_USER|" \
   "$ROOT/systemd/marker-server-ui.service" > "$UNIT_DIR/marker-server-ui.service"
 
 ln -sfn "$PREFIX" /opt/marker-server/current
@@ -105,6 +136,7 @@ echo
 echo "Installed marker-server $VERSION"
 echo "  Prefix:  $PREFIX"
 echo "  Config:  $CONFIG"
+echo "  User:    $MARKER_USER"
 echo "  Marker:  marker.home → $MARKER_HOME"
 if [[ ! -x "$MARKER_HOME/venv/bin/python" ]]; then
   echo "  WARNING: Marker python missing at $MARKER_HOME/venv/bin/python"
@@ -112,5 +144,7 @@ if [[ ! -x "$MARKER_HOME/venv/bin/python" ]]; then
 fi
 mkdir -p "$PREFIX/apache"
 cp -f "$ROOT/apache/"*.example "$PREFIX/apache/" 2>/dev/null || true
+chown -R "$MARKER_USER:$MARKER_USER" "$PREFIX/apache" "$PREFIX/docs" 2>/dev/null || true
 echo "  Edit llm.* and runtime.cuda_visible_devices in config.json, then:"
 echo "    sudo systemctl enable --now marker-server-api.service marker-server-ui.service"
+echo "  If Surya uses Docker/vLLM, ensure $MARKER_USER is in the docker group and re-login/restart."

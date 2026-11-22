@@ -5,12 +5,17 @@ After=network-online.target
 
 [Service]
 Type=simple
+User=marker
+Group=marker
 WorkingDirectory=/opt/marker-server/0.1.0
 Environment=MARKER_SERVER_CONFIG=/opt/marker-server/0.1.0/config.json
 ExecStart=/opt/marker-server/0.1.0/bin/run-api.sh
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=300
+# Drop privileges; GPU/Docker access comes from supplementary groups set at install.
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

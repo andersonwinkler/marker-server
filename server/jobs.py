@@ -89,30 +89,26 @@ class JobManager:
             self._purge_expired_locked()
             return self._jobs.get(job_id)
 
-    def take_result(self, job_id: str) -> Optional[Job]:
-        '''
-        Return the job and drop its result payload to free memory.
-        Status metadata remains until TTL expiry.
-        '''
-        with self._lock:
-            self._purge_expired_locked()
-            job = self._jobs.get(job_id)
-            if job is None:
-                return None
-            # Caller reads job.result; clear after copy in endpoint
-            return job
-
     def clear_result(self, job_id: str):
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.result = None
 
-    def cancel(self, job_id: str) -> Optional[Job]:
+    def release(self, job_id: str) -> Optional[Job]:
+        '''
+        Drop a finished job from memory (result + metadata).
+        Queued → cancel; running → request cancel; terminal → purge now.
+        '''
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 return None
+            if job.status in ('done', 'failed', 'cancelled'):
+                self._maybe_delete_input(job)
+                snapshot = job
+                self._jobs.pop(job_id, None)
+                return snapshot
             job.cancel_requested = True
             if job.status == 'queued':
                 job.status = 'cancelled'
@@ -122,6 +118,10 @@ class JobManager:
                     self._queue.remove(job_id)
                 self._maybe_delete_input(job)
             return job
+
+    def cancel(self, job_id: str) -> Optional[Job]:
+        '''Alias for release (cancel active jobs; purge finished ones).'''
+        return self.release(job_id)
 
     def status_dict(self, job: Job) -> dict:
         return {

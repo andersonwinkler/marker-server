@@ -11,7 +11,8 @@
     "ui_port": 8002,
     "upload_dir": null,
     "max_upload_bytes": 536870912,
-    "job_ttl_seconds": 3600
+    "job_ttl_seconds": 3600,
+    "allowed_input_dirs": []
   },
   "surya": {
     "inference_backend": null,

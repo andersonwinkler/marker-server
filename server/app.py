@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 
 import click
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -51,6 +51,52 @@ def _safe_upload_basename(name):
     return base[:180]
 
 
+def _max_upload_bytes() -> int:
+    return int(runtime_settings().get('max_upload_bytes') or 0)
+
+
+def _reject_oversized_content_length(request: Request):
+    '''Return 413 before reading the body when Content-Length is too large.'''
+    max_bytes = _max_upload_bytes()
+    if max_bytes <= 0:
+        return
+    raw = request.headers.get('content-length')
+    if raw is None or str(raw).strip() == '':
+        return
+    try:
+        length = int(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail='Invalid Content-Length')
+    if length > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f'Upload exceeds max_upload_bytes ({max_bytes})')
+
+
+def _path_allowed(filepath: str) -> bool:
+    '''
+    Enforce runtime.allowed_input_dirs for POST /marker.
+    None → any path; [] → disabled; else must sit under an allowlisted dir.
+    '''
+    allowed = runtime_settings().get('allowed_input_dirs')
+    if allowed is None:
+        return True
+    if not allowed:
+        return False
+    try:
+        real = os.path.realpath(filepath)
+    except OSError:
+        return False
+    for root in allowed:
+        try:
+            base = os.path.realpath(root)
+        except OSError:
+            continue
+        if real == base or real.startswith(base + os.sep):
+            return True
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from marker.models import create_model_dict, shutdown_models
@@ -73,6 +119,18 @@ app = FastAPI(
     # Custom /docs and /redoc below use relative openapi.json (proxy-friendly).
     docs_url=None,
     redoc_url=None)
+
+
+@app.middleware('http')
+async def limit_upload_content_length(request: Request, call_next):
+    if request.method == 'POST' and request.url.path.rstrip('/').endswith(
+            '/marker/upload'):
+        try:
+            _reject_oversized_content_length(request)
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code, content={'detail': exc.detail})
+    return await call_next(request)
 
 
 @app.get('/')
@@ -205,9 +263,18 @@ async def convert_pdf(params: CommonParams):
     '''
     Convert a server-local file. The path is never deleted after the job.
     Prefer POST /marker/upload for untrusted clients.
+
+    Paths must sit under runtime.allowed_input_dirs (empty list disables this
+    endpoint; null allows any path readable by the service user).
     '''
     if not params.filepath:
         raise HTTPException(status_code=400, detail='filepath is required')
+    if not _path_allowed(params.filepath):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                'filepath not under runtime.allowed_input_dirs '
+                '(empty allowlist disables POST /marker; use /marker/upload)'))
     if not os.path.isfile(params.filepath):
         raise HTTPException(status_code=400, detail='filepath not found')
     options = _options_from_params(params)
@@ -218,6 +285,7 @@ async def convert_pdf(params: CommonParams):
 
 @app.post('/marker/upload')
 async def convert_pdf_upload(
+    request: Request,
     profile: Optional[str] = Form(default='clean'),
     page_range: Optional[str] = Form(default=None),
     mode: Optional[str] = Form(default=None),
@@ -248,10 +316,11 @@ async def convert_pdf_upload(
     image_delivery: Optional[str] = Form(default=None),
     filter_block_types: Optional[str] = Form(default=None),
     file: UploadFile = File(..., description='PDF or document to convert')):
+    _reject_oversized_content_length(request)
     original_name = _safe_upload_basename(file.filename)
     upload_path = os.path.join(
         UPLOAD_DIRECTORY, f'{uuid.uuid4().hex}_{original_name}')
-    max_bytes = int(runtime_settings().get('max_upload_bytes') or 0)
+    max_bytes = _max_upload_bytes()
     written = 0
     try:
         with open(upload_path, 'wb') as upload_file:
@@ -320,8 +389,12 @@ async def job_status(job_id: str):
 
 @app.get('/marker/jobs/{job_id}/result')
 async def job_result(job_id: str):
+    '''
+    Return the conversion payload. Results stay until job TTL or DELETE.
+    Safe to retry after a dropped connection.
+    '''
     jobs: JobManager = app_data['jobs']
-    job = jobs.take_result(job_id)
+    job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail='Unknown job_id')
     if job.status == 'failed':
@@ -344,19 +417,20 @@ async def job_result(job_id: str):
         raise HTTPException(
             status_code=410,
             detail={
-                'message': 'Result already fetched or expired',
+                'message': 'Result expired',
                 **jobs.status_dict(job)})
     payload = dict(job.result)
     payload['job_id'] = job_id
-    # Drop heavy payload from memory after a successful fetch; status remains.
-    jobs.clear_result(job_id)
     return payload
 
 
 @app.delete('/marker/jobs/{job_id}')
 async def job_cancel(job_id: str):
+    '''
+    Cancel a queued/running job, or release a finished job (free memory early).
+    '''
     jobs: JobManager = app_data['jobs']
-    job = jobs.cancel(job_id)
+    job = jobs.release(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail='Unknown job_id')
     return jobs.status_dict(job)

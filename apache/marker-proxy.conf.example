@@ -9,10 +9,14 @@ ProxyPreserveHost Off
 Timeout 21600
 ProxyTimeout 21600
 
+# Reject oversized uploads before they reach uvicorn (match runtime.max_upload_bytes).
+LimitRequestBody 536870912
+
 RedirectMatch ^/marker$ /marker/
 RedirectMatch ^/marker-api$ /marker-api/
 
 <Location /marker/>
+    LimitRequestBody 536870912
     <RequireAny>
         Require ip 127.0.0.0/8
         Require ip ::1
@@ -23,6 +27,7 @@ RedirectMatch ^/marker-api$ /marker-api/
 </Location>
 
 <Location /marker-api/>
+    LimitRequestBody 536870912
     <RequireAny>
         Require ip 127.0.0.0/8
         Require ip ::1
