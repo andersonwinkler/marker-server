@@ -121,8 +121,7 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 
 | Key | Meaning |
 |-----|---------|
-| `api_key` | When non-empty, API routes (except `/`, `/docs`, `/redoc`, `/openapi.json`) require `Authorization: Bearer <api_key>` (Basic with that password also works). Override with `MARKER_SERVER_API_KEY`. Install generates a key on first install **and** on upgrade if missing/empty |
-| `ui_password` | Optional separate UI login (HTTP Basic / Bearer). `null`/omit → fall back to `api_key`. Does **not** protect the API by itself. Override with `MARKER_SERVER_UI_PASSWORD` |
+| `api_key` | When non-empty, API routes (except `/`, `/docs`, `/redoc`, `/openapi.json`) require `Authorization: Bearer <api_key>`. Override with `MARKER_SERVER_API_KEY`. Install generates a key on first install **and** on upgrade if missing/empty. The browser UI asks for this key (session by default; optional “Remember on this computer” uses `localStorage`) |
 
 ### `runtime`
 
@@ -259,9 +258,7 @@ cp config.example.json config.json
 
 - systemd runs API and UI as **`marker`** (not root). Code under `/opt/marker-server/<ver>/` is root-owned; the service only writes `uploads/` and Marker `cache/`/`hf/`.
 - **Docker ≈ root:** a **default install** (`surya.inference_backend` unset → vLLM) still adds `marker` to the `docker` group and prints a warning. That undoes much of the privilege drop. Choose deliberately: keep vLLM, or set `surya.inference_backend=llamacpp` / `MARKER_DOCKER=0` to skip docker.
-- **API key:** set `auth.api_key` (install generates one, including on upgrade if empty). API clients send `Authorization: Bearer <key>`. The UI uses `auth.ui_password` if set, otherwise the same API key (browser Basic-auth prompt, or Bearer). Default bind is `127.0.0.1`. Off localhost, put **HTTPS** (or equivalent TLS) in front — Basic auth is only base64.
-- `auth.ui_password` only protects the UI. An empty `auth.api_key` leaves the **API unauthenticated** even if `ui_password` is set. Empty both → neither is authenticated (not recommended).
-- Optionally set a distinct `auth.ui_password` so a browser-saved UI login is not the full API token.
+- **API key:** set `auth.api_key` (install generates one, including on upgrade if empty). Clients send `Authorization: Bearer <key>` only (no HTTP Basic). The browser UI prompts for that key, stores it in `sessionStorage` by default (or `localStorage` if “Remember” is checked; visible in DevTools), and forwards it on proxy calls. HTML previews use a sandboxed iframe so converted HTML cannot read the key. Empty key disables API auth (not recommended). Default bind is `127.0.0.1`. Off localhost, terminate **HTTPS** in front. (`auth.ui_password` from earlier builds is ignored and unused.)
 - Marker under `marker.home` stays readable for local CLI use; only `cache/` and `hf/` are mode `700` owned by `marker` (HF tokens). The service user gets ACL `rX` on the tree.
 - LLM credentials and `auth.api_key` live only in server `config.json` (`root:marker` mode `640`). Never commit that file; clients cannot supply the LLM endpoint or key.
 - Uploaded filenames are sanitized (basename only). Only files under `upload_dir` created by `/marker/upload` are deleted after a job; `POST /marker` never deletes its `filepath` and is disabled by default (`allowed_input_dirs: []`).

@@ -232,20 +232,12 @@ sed -e "s|/opt/marker-server/0.1.0|$PREFIX|g" \
 ln -sfn "$PREFIX" /opt/marker-server/current
 systemctl daemon-reload
 
-AUTH_STATE="$("$PYTHON_BIN" - "$CONFIG" <<'PY'
+AUTH_SET="$("$PYTHON_BIN" - "$CONFIG" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as fp:
     data = json.load(fp)
-auth = data.get('auth') or {}
-key = str(auth.get('api_key') or '').strip()
-ui = auth.get('ui_password')
-ui_set = ui is not None and str(ui).strip() != ''
-if key:
-    print('api')
-elif ui_set:
-    print('ui_only')
-else:
-    print('none')
+key = str(((data.get('auth') or {}).get('api_key') or '')).strip()
+print('yes' if key else 'no')
 PY
 )"
 
@@ -253,17 +245,23 @@ echo
 echo "Installed marker-server $VERSION"
 echo "  Prefix:  $PREFIX"
 echo "  Config:  $CONFIG (root:$MARKER_USER mode 640)"
-if [[ "$AUTH_STATE" == "api" ]]; then
+if [[ "$AUTH_SET" == "yes" ]]; then
   echo "  Auth:    API key enabled (config.json → auth.api_key)"
-  echo "           Clients: Authorization: Bearer <key>"
-  echo "           UI: HTTP Basic (any user, password = auth.ui_password or api_key)"
-  echo "           Off localhost: serve over HTTPS (Basic is base64 only)"
+  echo "           Clients / UI: Authorization: Bearer <key>"
+  echo "           UI stores the key in the browser (session by default)"
+  echo "           Off localhost: serve over HTTPS"
+  if "$PYTHON_BIN" - "$CONFIG" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as fp:
+    auth = (json.load(fp).get('auth') or {})
+sys.exit(0 if auth.get('ui_password') not in (None, '') else 1)
+PY
+  then
+    echo "           NOTE: auth.ui_password is present but ignored (UI uses api_key only)"
+  fi
   echo "           Show key: sudo python3 -c \"import json;print(json.load(open('$CONFIG'))['auth']['api_key'])\""
-elif [[ "$AUTH_STATE" == "ui_only" ]]; then
-  echo "  Auth:    WARNING — auth.api_key is empty; API is unauthenticated"
-  echo "           UI is protected by auth.ui_password only"
 else
-  echo "  Auth:    WARNING — auth.api_key is empty; API and UI are unauthenticated"
+  echo "  Auth:    WARNING — auth.api_key is empty; API is unauthenticated"
 fi
 echo "  User:    $MARKER_USER (home $MARKER_STATE_DIR)"
 echo "  Marker:  marker.home → $MARKER_HOME"

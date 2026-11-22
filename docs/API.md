@@ -16,9 +16,7 @@ Authorization: Bearer <auth.api_key>
 
 Missing or wrong key → `401` with `WWW-Authenticate: Bearer`. In Swagger UI, use **Authorize**.
 
-The browser UI on `:8002` requires `auth.ui_password` if set, otherwise the same `auth.api_key` (HTTP Basic: any username, password = that secret, or Bearer). After you authenticate to the UI, it forwards `Authorization: Bearer <auth.api_key>` to the API — so the UI is not an unauthenticated back door. Off localhost, terminate TLS in front of both ports (Basic auth is only base64).
-
-`auth.ui_password` alone does **not** protect the API: with an empty `auth.api_key`, `:8001` stays open.
+The browser UI on `:8002` is a thin proxy: the HTML page is public, asks for `auth.api_key` when the API requires it, stores it in `sessionStorage` by default (optional “Remember on this computer” → `localStorage`), and sends `Authorization: Bearer <key>` on `/convert` and `/jobs/…`. HTML result previews use `<iframe sandbox>` so document scripts cannot steal the key. Off localhost, terminate TLS in front of both ports.
 
 ---
 
@@ -455,7 +453,7 @@ blocks = data.get('blocks') or []
 
 ## UI proxy paths
 
-The browser UI (`:8002`) does not redefine the API; it proxies (and requires `auth.api_key` when configured):
+The browser UI (`:8002`) does not redefine the API; it proxies and forwards the browser’s Bearer token:
 
 | UI path | API path |
 |---------|----------|
@@ -475,4 +473,4 @@ The browser UI (`:8002`) does not redefine the API; it proxies (and requires `au
 6. **`POST /marker` filepath:** converts a server-local path and **never** deletes it. Default `allowed_input_dirs: []` disables path convert (upload only). Set dirs or `null` (any readable path) to enable. Only uploads under `upload_dir` are removed after the job.
 7. **Upload size:** capped by `runtime.max_upload_bytes` (default 512 MiB); also set `LimitRequestBody` on the reverse proxy. Non-PDFs / unreadable page counts skip chunking and always use a single pass.
 8. **Service user:** systemd units run as `marker` (not root).
-9. **Secrets:** rotate `auth.api_key` / `auth.ui_password` / LLM keys in server `config.json` and restart `marker-server-api` and `marker-server-ui`. Never put LLM keys in client requests.
+9. **Secrets:** rotate `auth.api_key` / LLM keys in server `config.json` and restart `marker-server-api` (UI needs no restart for key rotation — users re-enter the new key). Never put LLM keys in client requests.

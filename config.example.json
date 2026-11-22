@@ -4,8 +4,7 @@
     "python": null
   },
   "auth": {
-    "api_key": "",
-    "ui_password": null
+    "api_key": ""
   },
   "runtime": {
     "cuda_visible_devices": "0",

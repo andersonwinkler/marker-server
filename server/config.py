@@ -274,20 +274,5 @@ def api_key():
     return str(key).strip() if key else ''
 
 
-def ui_password():
-    '''Password for the browser UI (HTTP Basic / Bearer).
-
-    Prefer auth.ui_password (or MARKER_SERVER_UI_PASSWORD). Falls back to
-    api_key() so a single secret still works. Empty disables UI auth.
-    '''
-    env = os.getenv('MARKER_SERVER_UI_PASSWORD')
-    if env is not None and str(env).strip() != '':
-        return str(env).strip()
-    pwd = _section('auth').get('ui_password')
-    if pwd is not None and str(pwd).strip() != '':
-        return str(pwd).strip()
-    return api_key()
-
-
 def upload_dir():
     return runtime_settings()['upload_dir']

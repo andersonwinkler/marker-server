@@ -9,20 +9,19 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from api_auth import enforce_ui_api_key
-from config import api_key
 from http_limits import max_upload_bytes, reject_oversized_content_length
 
 MARKER_API = os.getenv('MARKER_API_BASE', 'http://127.0.0.1:8001').rstrip('/')
 
 
-def _api_headers(extra=None):
-    '''Forward the server API key after the UI itself has authenticated.'''
+def _forward_auth(request: Request, extra=None):
+    '''Pass the browser's Bearer token through to the API (no server-side key).'''
     headers = dict(extra or {})
-    key = api_key()
-    if key:
-        headers['Authorization'] = f'Bearer {key}'
+    auth = request.headers.get('authorization')
+    if auth:
+        headers['Authorization'] = auth
     return headers
+
 
 PAGE = '''<!DOCTYPE html>
 <html lang="en">
@@ -58,8 +57,8 @@ PAGE = '''<!DOCTYPE html>
   .drop strong { display: block; font-size: 18px; }
   .drop span { color: #5c564c; }
   input[type="file"] { display: none; }
-  .row { display: flex; flex-wrap: wrap; gap: 12px; }
-  label.field { display: grid; gap: 4px; font-size: 13px; color: #5c564c; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+  label.field { display: grid; gap: 4px; font-size: 13px; color: #5c564c; flex: 1; }
   label.field input, label.field select {
     font: inherit; color: inherit; background: #fffdf8;
     border: 1px solid #c9c1b4; border-radius: 8px; padding: 8px 10px;
@@ -74,7 +73,7 @@ PAGE = '''<!DOCTYPE html>
   #status { min-height: 1.4em; color: #5c564c; }
   #status.error { color: #8d2a2a; }
   #result { display: none; margin-top: 8px; }
-  .actions { display: flex; gap: 8px; margin: 8px 0 12px; }
+  .actions { display: flex; gap: 8px; margin: 8px 0 12px; flex-wrap: wrap; }
   pre, iframe {
     width: 100%; margin: 0; background: #fffdf8; border: 1px solid #c9c1b4;
     border-radius: 12px;
@@ -86,62 +85,95 @@ PAGE = '''<!DOCTYPE html>
     display: none; margin-top: 8px;
   }
   .bar > span { display: block; height: 100%; width: 0; background: #1c1915; }
+  #gate, #app { display: none; }
+  #gate.active, #app.active { display: block; }
+  .headrow { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; justify-content: space-between; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Marker</h1>
-  <p class="lead">Drop a file, or choose one. Long documents are converted in page blocks; progress updates while you wait.</p>
-  <form id="form">
-    <label class="drop" id="drop">
-      <input id="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.tif,.tiff,.bmp,.docx,.pptx,.xlsx,.html,.htm,.epub,application/pdf">
-      <div><strong>Drop a file here</strong><span id="filename">PDF, image, Word, PowerPoint, Excel, HTML, or EPUB</span></div>
-    </label>
-    <div><button type="button" id="pick" class="secondary">Choose a file</button></div>
-    <div class="row">
-      <label class="field">Profile
-        <select name="profile">
-          <option value="clean">Clean markdown</option>
-          <option value="paginated">Paginated markdown</option>
-          <option value="rag">RAG chunks</option>
-          <option value="dual">Dual (markdown + chunks)</option>
-          <option value="layout">Layout JSON</option>
-          <option value="html">HTML</option>
-        </select>
+  <section id="gate">
+    <h1>Marker</h1>
+    <p class="lead">Enter the server API key. By default it lasts for this tab only; tick Remember to keep it on this computer until you clear it.</p>
+    <form id="keyform">
+      <label class="field">API key
+        <input id="keyinput" name="api_key" type="password" autocomplete="off" spellcheck="false" required>
       </label>
-      <label class="field">Mode
-        <select name="mode">
-          <option value="balanced">Balanced</option>
-          <option value="fast">Fast</option>
-        </select>
-      </label>
-      <label class="field">Chunking
-        <select name="chunking">
-          <option value="auto">Auto</option>
-          <option value="on">On</option>
-          <option value="off">Off</option>
-        </select>
-      </label>
-      <label class="field">Pages
-        <input name="page_range" placeholder="all, or 0,5-10" autocomplete="off">
-      </label>
+      <label class="check"><input type="checkbox" id="remember" name="remember"> Remember on this computer</label>
+      <div class="row">
+        <button type="submit">Continue</button>
+      </div>
+      <p id="keystatus" class="error"></p>
+    </form>
+  </section>
+
+  <section id="app">
+    <div class="headrow">
+      <div>
+        <h1>Marker</h1>
+        <p class="lead">Drop a file, or choose one. Long documents are converted in page blocks; progress updates while you wait.</p>
+      </div>
+      <button type="button" id="clearkey" class="secondary">Clear API key</button>
     </div>
-    <label class="check"><input type="checkbox" name="force_ocr"> Force OCR on every page</label>
-    <label class="check"><input type="checkbox" name="use_llm" checked> Use vision LLM (server-configured)</label>
-    <div><button id="go" type="submit">Convert</button></div>
-  </form>
-  <p id="status"></p>
-  <div class="bar" id="bar"><span id="barfill"></span></div>
-  <section id="result">
-    <div class="actions">
-      <button type="button" id="save" class="secondary">Download</button>
-      <button type="button" id="savezip" class="secondary">Download with images</button>
-    </div>
-    <pre id="preview"></pre>
-    <iframe id="frame" hidden></iframe>
+    <form id="form">
+      <label class="drop" id="drop">
+        <input id="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.tif,.tiff,.bmp,.docx,.pptx,.xlsx,.html,.htm,.epub,application/pdf">
+        <div><strong>Drop a file here</strong><span id="filename">PDF, image, Word, PowerPoint, Excel, HTML, or EPUB</span></div>
+      </label>
+      <div><button type="button" id="pick" class="secondary">Choose a file</button></div>
+      <div class="row">
+        <label class="field">Profile
+          <select name="profile">
+            <option value="clean">Clean markdown</option>
+            <option value="paginated">Paginated markdown</option>
+            <option value="rag">RAG chunks</option>
+            <option value="dual">Dual (markdown + chunks)</option>
+            <option value="layout">Layout JSON</option>
+            <option value="html">HTML</option>
+          </select>
+        </label>
+        <label class="field">Mode
+          <select name="mode">
+            <option value="balanced">Balanced</option>
+            <option value="fast">Fast</option>
+          </select>
+        </label>
+        <label class="field">Chunking
+          <select name="chunking">
+            <option value="auto">Auto</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <label class="field">Pages
+          <input name="page_range" placeholder="all, or 0,5-10" autocomplete="off">
+        </label>
+      </div>
+      <label class="check"><input type="checkbox" name="force_ocr"> Force OCR on every page</label>
+      <label class="check"><input type="checkbox" name="use_llm" checked> Use vision LLM (server-configured)</label>
+      <div><button id="go" type="submit">Convert</button></div>
+    </form>
+    <p id="status"></p>
+    <div class="bar" id="bar"><span id="barfill"></span></div>
+    <section id="result">
+      <div class="actions">
+        <button type="button" id="save" class="secondary">Download</button>
+        <button type="button" id="savezip" class="secondary">Download with images</button>
+      </div>
+      <pre id="preview"></pre>
+      <iframe id="frame" sandbox hidden></iframe>
+    </section>
   </section>
 </main>
 <script>
+const KEY_STORE = "marker-server-api-key";
+const REMEMBER_STORE = "marker-server-api-key-remember";
+const gate = document.getElementById("gate");
+const app = document.getElementById("app");
+const keyform = document.getElementById("keyform");
+const keyinput = document.getElementById("keyinput");
+const keystatus = document.getElementById("keystatus");
+const rememberBox = document.getElementById("remember");
 const form = document.getElementById("form");
 const fileInput = document.getElementById("file");
 const drop = document.getElementById("drop");
@@ -154,6 +186,119 @@ const go = document.getElementById("go");
 const bar = document.getElementById("bar");
 const barfill = document.getElementById("barfill");
 let last = null;
+let authNeeded = true;
+
+function getKey() {
+  return (sessionStorage.getItem(KEY_STORE) || localStorage.getItem(KEY_STORE) || "").trim();
+}
+function setKey(value, remember) {
+  const v = value.trim();
+  sessionStorage.removeItem(KEY_STORE);
+  localStorage.removeItem(KEY_STORE);
+  if (remember) {
+    localStorage.setItem(REMEMBER_STORE, "1");
+    localStorage.setItem(KEY_STORE, v);
+  } else {
+    localStorage.removeItem(REMEMBER_STORE);
+    sessionStorage.setItem(KEY_STORE, v);
+  }
+}
+function clearKey() {
+  sessionStorage.removeItem(KEY_STORE);
+  localStorage.removeItem(KEY_STORE);
+  localStorage.removeItem(REMEMBER_STORE);
+}
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  const key = getKey();
+  if (key) headers["Authorization"] = "Bearer " + key;
+  return headers;
+}
+function showGate(message) {
+  gate.classList.add("active");
+  app.classList.remove("active");
+  keystatus.textContent = message || "";
+  keyinput.value = "";
+  rememberBox.checked = localStorage.getItem(REMEMBER_STORE) === "1";
+  keyinput.focus();
+}
+function showApp() {
+  gate.classList.remove("active");
+  app.classList.add("active");
+  keystatus.textContent = "";
+}
+async function probe(headers) {
+  return fetch("/jobs/__auth_probe__", { headers: headers || {} });
+}
+async function validateKey(key) {
+  const res = await probe({ "Authorization": "Bearer " + key });
+  if (res.status === 401) return { ok: false, reason: "invalid" };
+  if (res.status === 404 || res.status === 200) return { ok: true };
+  if (res.status >= 500) return { ok: false, reason: "unavailable" };
+  return { ok: false, reason: "unexpected" };
+}
+async function authRequired() {
+  const res = await probe();
+  return res.status === 401;
+}
+async function boot() {
+  try {
+    authNeeded = await authRequired();
+  } catch (err) {
+    showGate("API unreachable. Try again when the server is up.");
+    return;
+  }
+  if (!authNeeded) {
+    showApp();
+    return;
+  }
+  const key = getKey();
+  if (!key) {
+    showGate();
+    return;
+  }
+  try {
+    const result = await validateKey(key);
+    if (!result.ok) {
+      clearKey();
+      if (result.reason === "unavailable") {
+        showGate("API unreachable. Try again when the server is up.");
+      } else {
+        showGate("That saved key was rejected. Enter a valid API key.");
+      }
+      return;
+    }
+  } catch (err) {
+    showGate("API unreachable. Try again when the server is up.");
+    return;
+  }
+  showApp();
+}
+
+keyform.addEventListener("submit", async e => {
+  e.preventDefault();
+  const key = keyinput.value.trim();
+  if (!key) return;
+  keystatus.textContent = "Checking…";
+  try {
+    const result = await validateKey(key);
+    if (!result.ok) {
+      keystatus.textContent = result.reason === "unavailable"
+        ? "API unreachable."
+        : "Invalid API key.";
+      return;
+    }
+    setKey(key, rememberBox.checked);
+    showApp();
+  } catch (err) {
+    keystatus.textContent = err.message || String(err);
+  }
+});
+document.getElementById("clearkey").addEventListener("click", () => {
+  clearKey();
+  if (authNeeded) showGate("API key cleared.");
+  else showApp();
+});
 
 document.getElementById("pick").addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => {
@@ -252,9 +397,31 @@ function setProgress(done, total) {
     ? ("Working… " + done + "/" + total)
     : "Queued…";
 }
+function detailMessage(payload, fallback) {
+  if (!payload) return fallback;
+  if (typeof payload.detail === "string") return payload.detail;
+  if (payload.error) return payload.error;
+  return fallback;
+}
+async function apiFetch(url, options) {
+  const opts = options || {};
+  const res = await fetch(url, Object.assign({}, opts, {
+    headers: authHeaders(opts.headers)
+  }));
+  if (res.status === 401) {
+    clearKey();
+    showGate("API key rejected. Enter it again.");
+    throw new Error("Unauthorized");
+  }
+  return res;
+}
 
 form.addEventListener("submit", async e => {
   e.preventDefault();
+  if (authNeeded && !getKey()) {
+    showGate("API key required.");
+    return;
+  }
   const file = fileInput.files[0];
   if (!file) {
     status.textContent = "Choose a PDF first.";
@@ -275,9 +442,9 @@ form.addEventListener("submit", async e => {
   setProgress(0, 0);
   const started = Date.now();
   try {
-    const startRes = await fetch("/convert", { method: "POST", body });
+    const startRes = await apiFetch("/convert", { method: "POST", body });
     const start = await startRes.json();
-    if (!startRes.ok) throw new Error(start.detail || start.error || "Upload failed");
+    if (!startRes.ok) throw new Error(detailMessage(start, "Upload failed"));
     const jobId = start.job_id;
     if (!jobId) throw new Error("No job_id returned");
 
@@ -285,16 +452,16 @@ form.addEventListener("submit", async e => {
     while (st.status === "queued" || st.status === "running") {
       setProgress(st.progress?.done || 0, st.progress?.total || 0);
       await sleep(1500);
-      const poll = await fetch("/jobs/" + jobId);
+      const poll = await apiFetch("/jobs/" + jobId);
       st = await poll.json();
-      if (!poll.ok) throw new Error(st.detail || "Poll failed");
+      if (!poll.ok) throw new Error(detailMessage(st, "Poll failed"));
     }
     if (st.status === "failed") throw new Error(st.error || "Conversion failed");
     if (st.status === "cancelled") throw new Error("Job cancelled");
 
-    const res = await fetch("/jobs/" + jobId + "/result");
+    const res = await apiFetch("/jobs/" + jobId + "/result");
     const data = await res.json();
-    if (!res.ok || data.success === false) throw new Error(data.error || data.detail || "Result failed");
+    if (!res.ok || data.success === false) throw new Error(detailMessage(data, "Result failed"));
 
     const out = data.markdown != null ? data.markdown
       : (data.html != null ? data.html
@@ -322,8 +489,10 @@ form.addEventListener("submit", async e => {
     }
     result.style.display = "block";
   } catch (err) {
-    status.textContent = err.message || String(err);
-    status.className = "error";
+    if (String(err.message || err) !== "Unauthorized") {
+      status.textContent = err.message || String(err);
+      status.className = "error";
+    }
     bar.style.display = "none";
   } finally {
     go.disabled = false;
@@ -345,6 +514,8 @@ document.getElementById("savezip").addEventListener("click", () => {
   }
   downloadBlob(stem(last.name) + ".zip", zipStored(files));
 });
+
+boot();
 </script>
 </body>
 </html>
@@ -353,14 +524,20 @@ document.getElementById("savezip").addEventListener("click", () => {
 app = FastAPI()
 
 
-@app.middleware('http')
-async def require_ui_api_key(request: Request, call_next):
-    return await enforce_ui_api_key(request, call_next)
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "frame-src 'self'; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'")
 
 
 @app.get('/')
 def index():
-    return HTMLResponse(PAGE)
+    return HTMLResponse(PAGE, headers={'Content-Security-Policy': _CSP})
 
 
 @app.post('/convert')
@@ -381,7 +558,7 @@ async def convert(request: Request):
                     detail=f'Upload exceeds max_upload_bytes ({max_bytes})')
             yield chunk
 
-    headers = _api_headers({'content-type': content_type})
+    headers = _forward_auth(request, {'content-type': content_type})
     cl = request.headers.get('content-length')
     if cl:
         headers['content-length'] = cl
@@ -401,12 +578,12 @@ async def convert(request: Request):
 
 
 @app.get('/jobs/{job_id}')
-async def jobs_proxy(job_id: str):
+async def jobs_proxy(job_id: str, request: Request):
     timeout = httpx.Timeout(30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         upstream = await client.get(
             f'{MARKER_API}/marker/jobs/{job_id}',
-            headers=_api_headers())
+            headers=_forward_auth(request))
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
@@ -414,12 +591,12 @@ async def jobs_proxy(job_id: str):
 
 
 @app.get('/jobs/{job_id}/result')
-async def jobs_result_proxy(job_id: str):
+async def jobs_result_proxy(job_id: str, request: Request):
     timeout = httpx.Timeout(120.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         upstream = await client.get(
             f'{MARKER_API}/marker/jobs/{job_id}/result',
-            headers=_api_headers())
+            headers=_forward_auth(request))
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
