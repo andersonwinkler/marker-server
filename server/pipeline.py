@@ -30,15 +30,21 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
     '''
     options = apply_profile(options)
     options = merge_llm_options(options)
-    n_pages = pdf_page_count(filepath)
+    n_pages = pdf_page_count(filepath, required=False)
     options.setdefault('filename', None)
 
     want_md = bool(options.get('include_markdown'))
     want_html = bool(options.get('include_html'))
     want_blocks = bool(options.get('include_blocks'))
-    # HTML profile: Marker html renderer (chunking still uses md windows for seams
-    # then we also request html single-pass if not chunking)
-    use_chunking = should_chunk(n_pages, options) and not options.get('page_range')
+
+    # Page-block chunking needs a known page count and is markdown/blocks oriented.
+    # HTML-only delivery has no chunk stitcher — force a single Marker pass.
+    can_chunk = (
+        n_pages is not None
+        and should_chunk(n_pages, options)
+        and not options.get('page_range')
+        and not (want_html and not want_md))
+    use_chunking = can_chunk
 
     if progress_cb:
         progress_cb({'done': 0, 'total': 1, 'stage': 'probe'})
@@ -48,13 +54,14 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
             progress_cb({'done': 0, 'total': 1, 'stage': 'convert'})
 
         fmt = options.get('output_format') or 'markdown'
-        # For dual/rag we may need more than one renderer output
         markdown = html = None
         blocks = None
         images = {}
         metadata = None
         provenance = provenance_from_options(options)
 
+        # Prefer a single renderer when only one delivery is needed.
+        # dual / mixed requests may run Marker more than once (known limitation).
         if want_blocks or fmt in ('chunks', 'json'):
             force_fmt = 'chunks' if options.get('profile') == 'rag' else (
                 'json' if options.get('profile') == 'layout' else
@@ -71,7 +78,7 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
                 options.get('block_text_format') or 'html')
             blocks = _filter_blocks(blocks, options.get('filter_block_types'))
 
-        if want_md or (fmt == 'markdown' and not want_blocks):
+        if want_md or (fmt == 'markdown' and not want_blocks and not want_html):
             result = run_marker(
                 filepath, options, artifact_dict, force_format='markdown')
             provenance = {
@@ -108,13 +115,14 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
                 'n_chunks': 1})
 
     # --- chunked path (sequential windows; never parallel) ---
+    # HTML-only is rejected above; chunked windows produce markdown + optional blocks.
     markdown, images, blocks, meta = convert_chunked(
         filepath,
         options,
         artifact_dict,
         n_pages,
         progress_cb=progress_cb,
-        want_markdown=want_md or want_html or not want_blocks,
+        want_markdown=want_md or not want_blocks,
         want_blocks=want_blocks)
 
     if blocks:
@@ -144,7 +152,7 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
     return shape_response(
         options,
         markdown=markdown if want_md else None,
-        html=None if use_chunking else None,
+        html=None,
         blocks=blocks if want_blocks else None,
         images=images,
         metadata=meta.get('metadata'),

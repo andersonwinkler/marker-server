@@ -115,6 +115,8 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 | `torch_device` | Usually `cuda` |
 | `host` / `port` / `ui_port` | Bind addresses |
 | `upload_dir` | Temp uploads; default `<prefix>/uploads` |
+| `max_upload_bytes` | Reject larger uploads (default 512 MiB) |
+| `job_ttl_seconds` | Drop finished job metadata after this many seconds (default 3600); `/result` also clears the payload on first fetch |
 
 ### `surya`
 
@@ -196,6 +198,8 @@ When enabled, the server:
 
 Progress `total` is the number of planned chunks.
 
+**Limits:** `profile=html` always uses a single pass (no HTML stitcher). Cancel during a single-pass job is weak (see API docs). `dual` / markdown+blocks may run Marker twice.
+
 ---
 
 ## Relation to vanilla Marker CLI
@@ -235,7 +239,8 @@ cp config.example.json config.json
 
 - The API has **no built-in authentication**. Default bind is `127.0.0.1`. If you reverse-proxy it, restrict by network (see the Apache example) or put your own auth in front.
 - LLM credentials live only in server `config.json` (mode `600` after install). Never commit that file; clients cannot supply the endpoint or key.
-- Uploaded filenames are sanitized (basename only); prefer keeping the service off the public internet unless you add auth and upload limits.
+- Uploaded filenames are sanitized (basename only). Only files under `upload_dir` created by `/marker/upload` are deleted after a job; `POST /marker` never deletes its `filepath`.
+- Uploads are capped by `max_upload_bytes`. Prefer keeping the service off the public internet unless you add auth.
 
 ## License
 

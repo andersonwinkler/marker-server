@@ -12,59 +12,38 @@ if [[ ! -f "$CONFIG" ]]; then
   exit 1
 fi
 
-# Probe uses stdlib only — does not import marker-pdf.
-eval "$(python3.12 - "$CONFIG" <<'PY'
-import json, os, shlex, sys
-cfg_path = sys.argv[1]
-with open(cfg_path, encoding='utf-8') as fp:
-    cfg = json.load(fp)
-marker = cfg.get('marker') or {}
-home = os.path.abspath(marker.get('home') or '')
-if not home:
-    sys.stderr.write('config marker.home is required\n')
+# Prefer python3.12, then python3 (stdlib-only probe via config.py).
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+  PROBE_PY="$PYTHON_BIN"
+elif command -v python3.12 >/dev/null 2>&1; then
+  PROBE_PY=python3.12
+else
+  PROBE_PY=python3
+fi
+
+# Single source of truth: server/config.py (same env app.py applies).
+eval "$(
+  cd "$ROOT/server"
+  MARKER_SERVER_CONFIG="$CONFIG" "$PROBE_PY" <<'PY'
+import os, shlex, sys
+from config import marker_python, runtime_settings, surya_env_from_config
+
+try:
+    env = surya_env_from_config()
+except RuntimeError as exc:
+    sys.stderr.write(str(exc) + '\n')
     sys.exit(2)
-py = marker.get('python') or os.path.join(home, 'venv', 'bin', 'python')
+rt = runtime_settings()
+py = marker_python()
 if not os.path.isfile(py):
     sys.stderr.write(f'Marker python not found: {py}\n')
     sys.exit(2)
-rt = cfg.get('runtime') or {}
-surya = cfg.get('surya') or {}
-gguf_dir = os.path.join(home, 'surya-ocr-2')
-upload = rt.get('upload_dir') or os.path.join(os.path.dirname(cfg_path), 'uploads')
-env = {
-    'CUDA_VISIBLE_DEVICES': str(rt.get('cuda_visible_devices', '0')),
-    'TORCH_DEVICE': str(rt.get('torch_device', 'cuda')),
-    'MODEL_CACHE_DIR': os.path.join(home, 'cache'),
-    'HF_HOME': os.path.join(home, 'hf'),
-    'SURYA_INFERENCE_PARALLEL': str(int(surya.get('inference_parallel', 2))),
-    'SURYA_INFERENCE_KEEP_ALIVE': (
-        '1' if surya.get('inference_keep_alive', True) else '0'),
-    'SURYA_GUIDED_LAYOUT': '1' if surya.get('guided_layout', False) else '0',
-    'MARKER_UPLOAD_DIR': upload,
-    'MARKER_SERVER_CONFIG': cfg_path}
-backend = surya.get('inference_backend')
-if backend:
-    env['SURYA_INFERENCE_BACKEND'] = str(backend)
-gguf_model = surya.get('gguf_model') or os.path.join(gguf_dir, 'surya-2.gguf')
-gguf_mmproj = surya.get('gguf_mmproj') or os.path.join(
-    gguf_dir, 'surya-2-mmproj.gguf')
-if os.path.isfile(gguf_model):
-    env['SURYA_GGUF_LOCAL_MODEL_PATH'] = gguf_model
-if os.path.isfile(gguf_mmproj):
-    env['SURYA_GGUF_LOCAL_MMPROJ_PATH'] = gguf_mmproj
-llama_bin = surya.get('llama_cpp_binary') or os.environ.get('LLAMA_CPP_BINARY')
-if llama_bin:
-    env['LLAMA_CPP_BINARY'] = str(llama_bin)
-extra = surya.get('llama_cpp_extra_args')
-if extra:
-    env['LLAMA_CPP_EXTRA_ARGS'] = str(extra)
-host = str(rt.get('host', '127.0.0.1'))
-port = str(int(rt.get('port', 8001)))
+env['MARKER_SERVER_CONFIG'] = os.environ.get('MARKER_SERVER_CONFIG', '')
 for k, v in env.items():
     print(f'export {k}={shlex.quote(str(v))}')
 print(f'MARKER_PY={shlex.quote(py)}')
-print(f'API_HOST={shlex.quote(host)}')
-print(f'API_PORT={shlex.quote(port)}')
+print(f'API_HOST={shlex.quote(str(rt["host"]))}')
+print(f'API_PORT={shlex.quote(str(int(rt["port"])))}')
 PY
 )"
 

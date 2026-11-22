@@ -7,6 +7,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 PREFIX="${INSTALL_PREFIX:-/opt/marker-server/$VERSION}"
 MARKER_HOME_DEFAULT="${MARKER_HOME:-/opt/marker/2.0.0}"
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+  PYTHON_BIN="$PYTHON_BIN"
+elif command -v python3.12 >/dev/null 2>&1; then
+  PYTHON_BIN=python3.12
+else
+  PYTHON_BIN=python3
+fi
 
 echo "Installing marker-server $VERSION → $PREFIX"
 echo "  (will point at Marker home: $MARKER_HOME_DEFAULT)"
@@ -36,7 +43,7 @@ CONFIG="$PREFIX/config.json"
 if [[ ! -f "$CONFIG" ]]; then
   cp "$ROOT/config.example.json" "$CONFIG"
   chmod 600 "$CONFIG"
-  python3.12 - "$CONFIG" "$MARKER_HOME" "${LLAMA_CPP_BINARY:-}" \
+  "$PYTHON_BIN" - "$CONFIG" "$MARKER_HOME" "${LLAMA_CPP_BINARY:-}" \
     "${MARKER_OPENAI_BASE_URL:-}" "${MARKER_OPENAI_MODEL:-}" \
     "${MARKER_OPENAI_API_KEY:-}" <<'PY'
 import json, sys
@@ -78,7 +85,7 @@ else
   echo "WARNING: $MARKER_HOME/venv missing; API deps not installed into Marker."
 fi
 if [[ ! -x "$PREFIX/venv/bin/python" ]]; then
-  python3.12 -m venv "$PREFIX/venv"
+  "$PYTHON_BIN" -m venv "$PREFIX/venv"
 fi
 # shellcheck disable=SC1091
 source "$PREFIX/venv/bin/activate"

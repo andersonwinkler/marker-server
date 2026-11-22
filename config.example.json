@@ -9,7 +9,9 @@
     "host": "127.0.0.1",
     "port": 8001,
     "ui_port": 8002,
-    "upload_dir": null
+    "upload_dir": null,
+    "max_upload_bytes": 536870912,
+    "job_ttl_seconds": 3600
   },
   "surya": {
     "inference_backend": null,

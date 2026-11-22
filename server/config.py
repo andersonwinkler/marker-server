@@ -99,6 +99,12 @@ def runtime_settings():
         upload = (
             os.path.join(_SERVER_ROOT, 'uploads')
             if os.path.isdir(_SERVER_ROOT) else './uploads')
+    max_upload = rt.get('max_upload_bytes')
+    if max_upload is None:
+        max_upload = env_int('MARKER_MAX_UPLOAD_BYTES', 512 * 1024 * 1024)
+    job_ttl = rt.get('job_ttl_seconds')
+    if job_ttl is None:
+        job_ttl = env_int('MARKER_JOB_TTL_SECONDS', 3600)
     return {
         'cuda_visible_devices': rt.get(
             'cuda_visible_devices',
@@ -108,6 +114,8 @@ def runtime_settings():
         'port': int(rt.get('port', 8001)),
         'ui_port': int(rt.get('ui_port', 8002)),
         'upload_dir': upload,
+        'max_upload_bytes': int(max_upload),
+        'job_ttl_seconds': int(job_ttl),
         'marker_home': home}
 
 

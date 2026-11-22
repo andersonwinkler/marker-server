@@ -268,7 +268,10 @@ Conversion result (see [Result payload](#result-payload)) plus `job_id`.
 | `404` | `{ "detail": "Unknown job_id" }` | Bad id |
 | `409` | `{ "detail": "Job was cancelled" }` | Cancelled |
 | `409` | `{ "detail": { "message": "Job not finished", …job } }` | Still queued/running |
+| `410` | `{ "detail": { "message": "Result already fetched or expired", …job } }` | Result cleared after a prior fetch, or job TTL elapsed |
 | `500` | `{ "success": false, "error": "…", …job }` | Conversion failed |
+
+Finished jobs are kept in memory for `runtime.job_ttl_seconds` (default 3600). A successful `/result` fetch clears the heavy payload immediately; status metadata remains until TTL.
 
 ---
 
@@ -276,8 +279,8 @@ Conversion result (see [Result payload](#result-payload)) plus `job_id`.
 
 Request cancellation.
 
-- If `queued`: removed from queue → `cancelled` immediately  
-- If `running`: best-effort; may finish current unit before stopping  
+- If `queued`: removed from queue → `cancelled` immediately
+- If `running`: best-effort. Cancel is checked in the progress callback between chunk windows / Marker passes. A **single-pass** job only reports progress before and after `run_marker()`, so cancel may take effect only after that conversion finishes. Marker itself has no mid-run stop API.
 
 ### Response `200`
 
@@ -301,8 +304,8 @@ Updated job object.
 | `paginated` | yes | — | — | Markdown with page markers |
 | `rag` | — | — | yes | Flat chunks with page / bbox (RAG) |
 | `layout` | — | — | yes | Layout-oriented block tree flatten |
-| `html` | — | yes | — | HTML document |
-| `dual` | yes | — | yes | Markdown + blocks (more work) |
+| `html` | — | yes | — | HTML document (always single-pass; no page-block chunking) |
+| `dual` | yes | — | yes | Markdown + blocks (**two** Marker passes today) |
 
 ---
 
@@ -448,5 +451,8 @@ The browser UI (`:8002`) does not redefine the API; it proxies:
 1. **Auth:** this API has no built-in authentication. Keep it on localhost or protect it at the reverse proxy.
 2. **Timeouts:** do not use a short HTTP timeout on `/result` polling loops; use short timeouts on status polls and a long timeout only when fetching a large result body.
 3. **Concurrency:** submitting many jobs is fine; they queue. Only one runs. Don’t also run Marker CLI on the same GPU during a heavy job.
-4. **Chunking + `page_range`:** a non-empty `page_range` turns off auto page-block splitting for that request.
-5. **Secrets:** rotate keys in server `config.json` and restart `marker-server-api`; never put keys in client requests.
+4. **Chunking + `page_range`:** a non-empty `page_range` turns off auto page-block splitting for that request. HTML-only (`profile=html`) always uses a single Marker pass (no chunk stitcher).
+5. **Dual / mixed deliveries:** `profile=dual` (or any request that asks for both markdown and blocks) currently runs Marker once per output format. Expect roughly 2× GPU time until a single-build multi-render path lands.
+6. **`POST /marker` filepath:** converts a server-local path and **never** deletes it. Only uploads under `upload_dir` are removed after the job.
+7. **Upload size:** capped by `runtime.max_upload_bytes` (default 512 MiB). Non-PDFs skip page-count probing and always use a single pass.
+8. **Secrets:** rotate keys in server `config.json` and restart `marker-server-api`; never put keys in client requests.

@@ -349,7 +349,8 @@ def index():
 async def convert(request: Request):
     content_type = request.headers.get('content-type', '')
     body = await request.body()
-    timeout = httpx.Timeout(None)
+    # Finite write/connect limits; read stays open for slow upstream accepts.
+    timeout = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         upstream = await client.post(
             f'{MARKER_API}/marker/upload',
@@ -374,7 +375,7 @@ async def jobs_proxy(job_id: str):
 
 @app.get('/jobs/{job_id}/result')
 async def jobs_result_proxy(job_id: str):
-    timeout = httpx.Timeout(60.0)
+    timeout = httpx.Timeout(120.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         upstream = await client.get(f'{MARKER_API}/marker/jobs/{job_id}/result')
     return Response(

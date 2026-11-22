@@ -54,8 +54,12 @@ def _safe_upload_basename(name):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from marker.models import create_model_dict, shutdown_models
+    rt = runtime_settings()
     app_data['models'] = create_model_dict()
-    app_data['jobs'] = JobManager(lambda: app_data['models'])
+    app_data['jobs'] = JobManager(
+        lambda: app_data['models'],
+        upload_dir=UPLOAD_DIRECTORY,
+        job_ttl_seconds=int(rt.get('job_ttl_seconds') or 3600))
     yield
     if 'models' in app_data:
         shutdown_models(app_data['models'])
@@ -189,14 +193,19 @@ def _options_from_params(params: CommonParams) -> dict:
     return {k: v for k, v in options.items() if v is not None}
 
 
-def _submit(filepath: str, options: dict) -> dict:
+def _submit(filepath: str, options: dict, delete_filepath: bool = False) -> dict:
     jobs: JobManager = app_data['jobs']
-    job = jobs.submit(filepath, options)
+    job = jobs.submit(
+        filepath, options, delete_filepath=delete_filepath)
     return jobs.status_dict(job)
 
 
 @app.post('/marker')
 async def convert_pdf(params: CommonParams):
+    '''
+    Convert a server-local file. The path is never deleted after the job.
+    Prefer POST /marker/upload for untrusted clients.
+    '''
     if not params.filepath:
         raise HTTPException(status_code=400, detail='filepath is required')
     if not os.path.isfile(params.filepath):
@@ -204,7 +213,7 @@ async def convert_pdf(params: CommonParams):
     options = _options_from_params(params)
     options['filename'] = options.get('filename') or os.path.basename(
         params.filepath)
-    return _submit(params.filepath, options)
+    return _submit(params.filepath, options, delete_filepath=False)
 
 
 @app.post('/marker/upload')
@@ -242,8 +251,27 @@ async def convert_pdf_upload(
     original_name = _safe_upload_basename(file.filename)
     upload_path = os.path.join(
         UPLOAD_DIRECTORY, f'{uuid.uuid4().hex}_{original_name}')
-    with open(upload_path, 'wb+') as upload_file:
-        upload_file.write(await file.read())
+    max_bytes = int(runtime_settings().get('max_upload_bytes') or 0)
+    written = 0
+    try:
+        with open(upload_path, 'wb') as upload_file:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if max_bytes > 0 and written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f'Upload exceeds max_upload_bytes ({max_bytes})')
+                upload_file.write(chunk)
+    except Exception:
+        try:
+            if os.path.isfile(upload_path):
+                os.remove(upload_path)
+        except OSError:
+            pass
+        raise
 
     params = CommonParams(
         filepath=upload_path,
@@ -278,7 +306,7 @@ async def convert_pdf_upload(
         filter_block_types=filter_block_types,
         filename=original_name)
     options = _options_from_params(params)
-    return _submit(upload_path, options)
+    return _submit(upload_path, options, delete_filepath=True)
 
 
 @app.get('/marker/jobs/{job_id}')
@@ -293,7 +321,7 @@ async def job_status(job_id: str):
 @app.get('/marker/jobs/{job_id}/result')
 async def job_result(job_id: str):
     jobs: JobManager = app_data['jobs']
-    job = jobs.get(job_id)
+    job = jobs.take_result(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail='Unknown job_id')
     if job.status == 'failed':
@@ -306,14 +334,22 @@ async def job_result(job_id: str):
                 **jobs.status_dict(job)})
     if job.status == 'cancelled':
         raise HTTPException(status_code=409, detail='Job was cancelled')
-    if job.status != 'done' or job.result is None:
+    if job.status != 'done':
         raise HTTPException(
             status_code=409,
             detail={
                 'message': 'Job not finished',
                 **jobs.status_dict(job)})
+    if job.result is None:
+        raise HTTPException(
+            status_code=410,
+            detail={
+                'message': 'Result already fetched or expired',
+                **jobs.status_dict(job)})
     payload = dict(job.result)
     payload['job_id'] = job_id
+    # Drop heavy payload from memory after a successful fetch; status remains.
+    jobs.clear_result(job_id)
     return payload
 
 

@@ -37,8 +37,13 @@ def pkg_version(dist_name):
         return None
 
 
-def pdf_page_count(pdffile):
-    '''Return page count via pdfinfo, with pypdf fallback.'''
+def pdf_page_count(pdffile, required=False):
+    '''
+    Return page count via pdfinfo, with pypdf fallback.
+
+    When required=False (default), return None for non-PDFs / unreadable
+    files so the pipeline can skip chunking and let Marker open the file.
+    '''
     try:
         out = subprocess.check_output(
             ['pdfinfo', pdffile], text=True, stderr=subprocess.STDOUT)
@@ -51,7 +56,10 @@ def pdf_page_count(pdffile):
         from pypdf import PdfReader
         return len(PdfReader(pdffile).pages)
     except Exception as exc:
-        raise RuntimeError(f'Could not determine page count for {pdffile}') from exc
+        if required:
+            raise RuntimeError(
+                f'Could not determine page count for {pdffile}') from exc
+        return None
 
 
 def processor_list(llm_scope, extract_images):
