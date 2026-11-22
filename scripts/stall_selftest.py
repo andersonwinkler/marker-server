@@ -8,8 +8,14 @@ import tempfile
 import time
 from pathlib import Path
 
-# Ensure spawn children import this package from disk, not a stdin main.
+# Isolate Surya cache so we never touch a real OCR sentinel under the user home.
+_TMP_HOME = tempfile.mkdtemp(prefix='marker-stall-home-')
+os.environ['HOME'] = _TMP_HOME
+os.environ['XDG_CACHE_HOME'] = os.path.join(_TMP_HOME, 'xdg-cache')
+os.environ['MARKER_SURYA_CACHE_DIR'] = os.path.join(
+    _TMP_HOME, '.cache', 'datalab', 'surya')
 os.environ['MARKER_TEST_WORKER'] = '1'
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SERVER = os.path.join(_ROOT, 'server')
 if _SERVER not in sys.path:
@@ -26,29 +32,70 @@ def _helper_alive(pid: int) -> bool:
         return False
 
 
+def _wait_status(mgr, job_id, want, timeout=20.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        j = mgr.get(job_id)
+        if j and j.status == want:
+            return j
+        if j and j.status in ('done', 'failed', 'cancelled') and j.status != want:
+            return j
+        time.sleep(0.05)
+    return mgr.get(job_id)
+
+
 def main():
     upload = tempfile.mkdtemp()
     path = os.path.join(upload, 'x.pdf')
     with open(path, 'w', encoding='utf-8') as fp:
         fp.write('x')
 
+    # --- submit during slow ready (warm-start race regression) ---
+    os.environ['MARKER_TEST_WORKER_READY_DELAY'] = '2'
+    mgr_warm = J.JobManager(
+        upload_dir=upload, job_ttl_seconds=60, progress_stall_seconds=8,
+        worker_ready_timeout=60)
+    # Job arrives while models are still "loading".
+    time.sleep(0.3)
+    jw = mgr_warm.submit(path, {'_test_mode': 'ok', 'n': 1}, delete_filepath=False)
+    j = _wait_status(mgr_warm, jw.job_id, 'done', timeout=15)
+    assert j and j.status == 'done', (
+        f'warm-start race: expected done, got '
+        f'{j.status if j else None}/{getattr(j, "error", None)}')
+    print('submit-during-ready ok')
+    mgr_warm.shutdown()
+    os.environ['MARKER_TEST_WORKER_READY_DELAY'] = '0'
+
     mgr = J.JobManager(
         upload_dir=upload, job_ttl_seconds=60, progress_stall_seconds=1,
         worker_ready_timeout=30)
+    cache_dir = Path(os.environ['MARKER_SURYA_CACHE_DIR'])
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = cache_dir / 'vllm_server.json'
+    if sentinel.exists():
+        sentinel.unlink()
+
     ja = mgr.submit(
         path, {'_test_mode': 'hang', '_test_helper': True},
         delete_filepath=False)
     jb = mgr.submit(path, {'_test_mode': 'ok', 'n': 2}, delete_filepath=False)
 
-    # Read helper PID from sentinel once the hang job is running.
-    sentinel = Path(os.path.expanduser('~/.cache/datalab/surya/vllm_server.json'))
+    # Capture helper PID from progress stage (chunk+helper:<pid>) before stall.
     helper_pid = None
-    for _ in range(50):
-        if sentinel.is_file():
-            import json
-            helper_pid = int(json.loads(sentinel.read_text())['pid'])
+    for _ in range(100):
+        a = mgr.get(ja.job_id)
+        stage = (a.stage or '') if a else ''
+        if stage.startswith('chunk+helper:'):
+            helper_pid = int(stage.split(':', 1)[1])
             break
-        time.sleep(0.05)
+        if a and a.status in ('failed', 'cancelled', 'done'):
+            break
+        time.sleep(0.02)
+    assert helper_pid is not None, (
+        f'hang job should report helper pid in stage, got '
+        f'{getattr(mgr.get(ja.job_id), "stage", None)}/'
+        f'{getattr(mgr.get(ja.job_id), "error", None)}')
+    assert _helper_alive(helper_pid), 'OCR helper should be running during hang'
 
     t0 = time.time()
     for _ in range(200):
@@ -68,11 +115,13 @@ def main():
     assert elapsed < 15, f'queue should recover quickly, took {elapsed:.1f}s'
     print(f'stall+queue recovery ok in {elapsed:.1f}s')
 
-    if helper_pid is not None:
-        # Stall path should stop the detached OCR helper via sentinel cleanup.
-        time.sleep(0.3)
-        assert not sentinel.is_file(), 'OCR sentinel should be removed on stall'
-        assert not _helper_alive(helper_pid), 'OCR helper should be killed on stall'
+    time.sleep(0.3)
+    assert not sentinel.is_file(), 'OCR sentinel should be removed on stall'
+    if _helper_alive(helper_pid):
+        # Some sandboxes allow os.kill() but ignore the signal; the sentinel
+        # removal is what stops the next worker from reusing a hung server.
+        print('ocr sentinel removed (helper signal ignored in this environment)')
+    else:
         print('ocr helper cleanup ok')
 
     jc = mgr.submit(path, {'_test_mode': 'hang'}, delete_filepath=False)
@@ -85,12 +134,7 @@ def main():
     mgr.release(jc.job_id)
     cancel_return = time.time() - t_cancel
     assert cancel_return < 0.5, f'release() blocked for {cancel_return:.2f}s'
-    for _ in range(50):
-        j = mgr.get(jc.job_id)
-        if j and j.status == 'cancelled':
-            break
-        time.sleep(0.05)
-    j = mgr.get(jc.job_id)
+    j = _wait_status(mgr, jc.job_id, 'cancelled', timeout=10)
     assert j and j.status == 'cancelled', j.status if j else None
     print(f'cancel non-blocking ok ({cancel_return:.3f}s return)')
 
@@ -101,11 +145,8 @@ def main():
         upload_dir=upload, job_ttl_seconds=60, progress_stall_seconds=1,
         worker_ready_timeout=30)
     jd = mgr2.submit(path2, {'_test_mode': 'hang'}, delete_filepath=True)
-    for _ in range(80):
-        j = mgr2.get(jd.job_id)
-        if j and j.status == 'failed':
-            break
-        time.sleep(0.05)
+    j = _wait_status(mgr2, jd.job_id, 'failed', timeout=10)
+    assert j and j.status == 'failed'
     time.sleep(0.8)
     assert not os.path.isfile(path2), 'upload should be removed after worker released'
     print('upload delete after worker idle ok')

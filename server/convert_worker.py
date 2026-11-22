@@ -17,8 +17,16 @@ def _test_worker_main(cmd_queue, event_queue, config_path: str, server_dir: str)
     '''Importable dummy worker for stall/cancel tests (no Marker).'''
     import json
     import subprocess
+    import sys
     from pathlib import Path
 
+    # Simulate slow model load so callers can test submit-during-startup.
+    try:
+        delay = float(os.environ.get('MARKER_TEST_WORKER_READY_DELAY') or 0)
+    except ValueError:
+        delay = 0.0
+    if delay > 0:
+        time.sleep(delay)
     event_queue.put(('ready', None, None))
     while True:
         msg = cmd_queue.get()
@@ -29,24 +37,32 @@ def _test_worker_main(cmd_queue, event_queue, config_path: str, server_dir: str)
         _, job_id, filepath, options = msg
         mode = (options or {}).get('_test_mode', 'ok')
         # Optional detached helper + Surya-like sentinel (stall recovery test).
-        helper = None
+        # Cmdline includes "llama-server" so surya_cleanup's PID check accepts it.
+        stage = 'chunk'
         if (options or {}).get('_test_helper'):
             helper = subprocess.Popen(
-                ['sleep', '300'],
+                [
+                    sys.executable, '-c',
+                    'import time; time.sleep(300)  # llama-server surrogate'],
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL)
-            cache = Path(os.path.expanduser('~/.cache/datalab/surya'))
+            cache = Path(
+                os.environ.get('MARKER_SURYA_CACHE_DIR')
+                or os.path.expanduser('~/.cache/datalab/surya'))
             cache.mkdir(parents=True, exist_ok=True)
-            (cache / 'vllm_server.json').write_text(json.dumps({
+            sentinel = cache / 'vllm_server.json'
+            sentinel.write_text(json.dumps({
                 'port': 9,
                 'pid': helper.pid,
                 'backend': 'vllm',
                 'cleanup_id': str(helper.pid),
                 'cleanup_kind': 'process'}))
+            # Embed pid in stage so tests can observe it without racing the file.
+            stage = f'chunk+helper:{helper.pid}'
         event_queue.put((
             'progress', job_id,
-            {'done': 0, 'total': 3, 'stage': 'chunk'}))
+            {'done': 0, 'total': 3, 'stage': stage}))
         if mode == 'hang':
             time.sleep(60)
             event_queue.put(('done', job_id, {'ok': True}))

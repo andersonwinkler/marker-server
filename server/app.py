@@ -87,8 +87,8 @@ async def lifespan(app: FastAPI):
         worker_ready_timeout=float(
             rt.get('worker_ready_seconds') or 1800))
     app_data['jobs'] = jobs
-    # Prefetch models so the first real job is not cold; failures are logged.
-    jobs.warm_start()
+    # Models load inside the job-worker thread at start (single reader of
+    # the conversion process event queue). Jobs submitted during load wait.
     yield
     jobs.shutdown()
     app_data.pop('jobs', None)

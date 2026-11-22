@@ -119,7 +119,7 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 | `max_upload_bytes` | Reject larger uploads (default 512 MiB); also enforce at the reverse proxy |
 | `job_ttl_seconds` | Drop finished jobs (including results) after this many seconds (default 3600); `DELETE` releases early |
 | `progress_stall_seconds` | Fail a job if no progress update arrives for this long (default **7200**), then **kill the conversion subprocess**, **stop Surya’s OCR server** (docker/PID from `~/.cache/datalab/surya/*_server.json`), and continue the queue. A 10-hour job is fine if progress keeps moving. `0` disables. Single-pass jobs only update at start/end, so this is effectively a per-pass limit — raise it for huge one-shot HTML converts |
-| `worker_ready_seconds` | How long to wait for the conversion worker to load models and report ready (default **1800**). The service also warm-starts the worker at boot |
+| `worker_ready_seconds` | How long to wait for the conversion worker to load models and report ready (default **1800**). The job-scheduler thread loads the worker at startup (jobs submitted during load stay queued) |
 | `allowed_input_dirs` | Allowlist for `POST /marker` paths. `[]` (default) disables path convert; `null` allows any path the service user can read |
 
 ### `surya`

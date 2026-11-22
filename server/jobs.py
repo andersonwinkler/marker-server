@@ -90,6 +90,9 @@ class JobManager:
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._worker_lock = threading.Lock()
+        # Serializes ensure/start so only one thread owns event_q at a time.
+        self._ensure_lock = threading.Lock()
+        self._worker_ready = threading.Event()
         self._queue: list[str] = []
         self._ctx = mp.get_context('spawn')
         self._cmd_q = None
@@ -155,18 +158,6 @@ class JobManager:
                 self._maybe_delete_input(job)
             # running: worker loop / reaper will kill the subprocess
         return job
-
-    def warm_start(self):
-        '''Start the conversion worker in the background (model load at boot).'''
-        threading.Thread(
-            target=self._warm_start_bg, name='marker-warm-start',
-            daemon=True).start()
-
-    def _warm_start_bg(self):
-        try:
-            self._ensure_worker()
-        except Exception:
-            traceback.print_exc()
 
     def shutdown(self):
         self._shutdown = True
@@ -259,7 +250,13 @@ class JobManager:
         return kill
 
     def _start_worker(self):
+        '''
+        Spawn the conversion process and wait until it reports ready.
+
+        Caller must hold _ensure_lock. Only this wait reads event_q until ready.
+        '''
         with self._worker_lock:
+            self._worker_ready.clear()
             self._cmd_q = self._ctx.Queue()
             self._event_q = self._ctx.Queue()
             cfg = config_path() or ''
@@ -289,6 +286,7 @@ class JobManager:
                 raise RuntimeError(
                     'Conversion worker ready wait failed')
             if evt and evt[0] == 'ready':
+                self._worker_ready.set()
                 return
         self._kill_worker(stop_ocr=False)
         raise RuntimeError(
@@ -298,6 +296,7 @@ class JobManager:
 
     def _kill_worker(self, stop_ocr: bool = False):
         with self._worker_lock:
+            self._worker_ready.clear()
             proc = self._proc
             self._proc = None
             cmd_q, event_q = self._cmd_q, self._event_q
@@ -334,12 +333,22 @@ class JobManager:
                 traceback.print_exc()
 
     def _ensure_worker(self):
-        with self._worker_lock:
-            alive = self._proc is not None and self._proc.is_alive()
-        if alive:
-            return
-        self._kill_worker(stop_ocr=False)
-        self._start_worker()
+        '''
+        Ensure a ready conversion worker exists.
+
+        Check + start + ready-wait are one critical section so only the
+        scheduler thread ever reads event_q (no warm-start race).
+        '''
+        with self._ensure_lock:
+            with self._worker_lock:
+                alive = (
+                    self._proc is not None
+                    and self._proc.is_alive()
+                    and self._worker_ready.is_set())
+            if alive:
+                return
+            self._kill_worker(stop_ocr=False)
+            self._start_worker()
 
     def _reaper_loop(self):
         while not self._shutdown:
@@ -386,6 +395,12 @@ class JobManager:
             self._current_job_id = None
 
     def _worker_loop(self):
+        # Prefetch models here (not a second thread) so only this loop reads
+        # event_q. Jobs submitted during load simply wait in the FIFO queue.
+        try:
+            self._ensure_worker()
+        except Exception:
+            traceback.print_exc()
         while not self._shutdown:
             try:
                 self._worker_loop_once()
