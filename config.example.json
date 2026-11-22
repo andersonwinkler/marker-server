@@ -12,6 +12,7 @@
     "upload_dir": null,
     "max_upload_bytes": 536870912,
     "job_ttl_seconds": 3600,
+    "progress_stall_seconds": 7200,
     "allowed_input_dirs": []
   },
   "surya": {

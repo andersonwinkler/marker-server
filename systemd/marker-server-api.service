@@ -9,13 +9,17 @@ User=marker
 Group=marker
 WorkingDirectory=/opt/marker-server/0.1.0
 Environment=MARKER_SERVER_CONFIG=/opt/marker-server/0.1.0/config.json
+Environment=HOME=/var/lib/marker-server
+Environment=XDG_CACHE_HOME=/var/lib/marker-server/cache
 ExecStart=/opt/marker-server/0.1.0/bin/run-api.sh
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=300
-# Drop privileges; GPU/Docker access comes from supplementary groups set at install.
+# No absolute job runtime limit — jobs fail only on progress stall (see config).
+UMask=0027
 NoNewPrivileges=true
-PrivateTmp=true
+# PrivateTmp=false: Surya/vLLM may bind-mount host /tmp paths into containers.
+PrivateTmp=false
 
 [Install]
 WantedBy=multi-user.target

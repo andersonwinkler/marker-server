@@ -26,6 +26,7 @@ from config import (
     llm_defaults_from_env, marker_home, marker_python, runtime_settings,
     upload_dir)
 from convert import pkg_version
+from http_limits import max_upload_bytes, reject_oversized_content_length
 from jobs import JobManager
 
 # Apply CUDA / Surya / cache paths from config before Marker imports models.
@@ -49,28 +50,6 @@ def _safe_upload_basename(name):
     base = os.path.basename(name or '') or 'upload.bin'
     base = re.sub(r'[^A-Za-z0-9._-]+', '_', base).strip('._') or 'upload.bin'
     return base[:180]
-
-
-def _max_upload_bytes() -> int:
-    return int(runtime_settings().get('max_upload_bytes') or 0)
-
-
-def _reject_oversized_content_length(request: Request):
-    '''Return 413 before reading the body when Content-Length is too large.'''
-    max_bytes = _max_upload_bytes()
-    if max_bytes <= 0:
-        return
-    raw = request.headers.get('content-length')
-    if raw is None or str(raw).strip() == '':
-        return
-    try:
-        length = int(raw)
-    except ValueError:
-        raise HTTPException(status_code=400, detail='Invalid Content-Length')
-    if length > max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f'Upload exceeds max_upload_bytes ({max_bytes})')
 
 
 def _path_allowed(filepath: str) -> bool:
@@ -105,7 +84,8 @@ async def lifespan(app: FastAPI):
     app_data['jobs'] = JobManager(
         lambda: app_data['models'],
         upload_dir=UPLOAD_DIRECTORY,
-        job_ttl_seconds=int(rt.get('job_ttl_seconds') or 3600))
+        job_ttl_seconds=int(rt.get('job_ttl_seconds') or 3600),
+        progress_stall_seconds=int(rt.get('progress_stall_seconds') or 7200))
     yield
     if 'models' in app_data:
         shutdown_models(app_data['models'])
@@ -126,7 +106,7 @@ async def limit_upload_content_length(request: Request, call_next):
     if request.method == 'POST' and request.url.path.rstrip('/').endswith(
             '/marker/upload'):
         try:
-            _reject_oversized_content_length(request)
+            reject_oversized_content_length(request)
         except HTTPException as exc:
             return JSONResponse(
                 status_code=exc.status_code, content={'detail': exc.detail})
@@ -189,6 +169,8 @@ async def version():
         'cuda_visible_devices': rt.get('cuda_visible_devices'),
         'llm_enabled': bool(defaults.get('use_llm')),
         'llm_model': defaults.get('openai_model') if defaults.get('use_llm') else None,
+        'progress_stall_seconds': rt.get('progress_stall_seconds'),
+        'job_ttl_seconds': rt.get('job_ttl_seconds'),
         'chunking': chunk}
 
 
@@ -316,11 +298,10 @@ async def convert_pdf_upload(
     image_delivery: Optional[str] = Form(default=None),
     filter_block_types: Optional[str] = Form(default=None),
     file: UploadFile = File(..., description='PDF or document to convert')):
-    _reject_oversized_content_length(request)
     original_name = _safe_upload_basename(file.filename)
     upload_path = os.path.join(
         UPLOAD_DIRECTORY, f'{uuid.uuid4().hex}_{original_name}')
-    max_bytes = _max_upload_bytes()
+    max_bytes = max_upload_bytes()
     written = 0
     try:
         with open(upload_path, 'wb') as upload_file:
@@ -433,6 +414,7 @@ async def job_cancel(job_id: str):
     job = jobs.release(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail='Unknown job_id')
+    # Finished jobs are purged; active ones return updated status.
     return jobs.status_dict(job)
 
 

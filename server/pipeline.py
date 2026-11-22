@@ -50,10 +50,18 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
         progress_cb({'done': 0, 'total': 1, 'stage': 'probe'})
 
     if not use_chunking:
-        if progress_cb:
-            progress_cb({'done': 0, 'total': 1, 'stage': 'convert'})
-
         fmt = options.get('output_format') or 'markdown'
+        need_blocks = want_blocks or fmt in ('chunks', 'json')
+        need_md = want_md or (
+            fmt == 'markdown' and not want_blocks and not want_html)
+        need_html = want_html or fmt == 'html'
+        n_passes = sum(1 for flag in (need_blocks, need_md, need_html) if flag)
+        n_passes = max(1, n_passes)
+        done_passes = 0
+        if progress_cb:
+            progress_cb({
+                'done': 0, 'total': n_passes, 'stage': 'convert'})
+
         markdown = html = None
         blocks = None
         images = {}
@@ -62,7 +70,7 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
 
         # Prefer a single renderer when only one delivery is needed.
         # dual / mixed requests may run Marker more than once (known limitation).
-        if want_blocks or fmt in ('chunks', 'json'):
+        if need_blocks:
             force_fmt = 'chunks' if options.get('profile') == 'rag' else (
                 'json' if options.get('profile') == 'layout' else
                 ('chunks' if want_blocks else fmt))
@@ -77,8 +85,12 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
                 result.get('output'),
                 options.get('block_text_format') or 'html')
             blocks = _filter_blocks(blocks, options.get('filter_block_types'))
+            done_passes += 1
+            if progress_cb:
+                progress_cb({
+                    'done': done_passes, 'total': n_passes, 'stage': 'convert'})
 
-        if want_md or (fmt == 'markdown' and not want_blocks and not want_html):
+        if need_md:
             result = run_marker(
                 filepath, options, artifact_dict, force_format='markdown')
             provenance = {
@@ -87,8 +99,12 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
             metadata = result.get('metadata')
             images.update(result.get('images') or {})
             markdown = result.get('output') or ''
+            done_passes += 1
+            if progress_cb:
+                progress_cb({
+                    'done': done_passes, 'total': n_passes, 'stage': 'convert'})
 
-        if want_html or fmt == 'html':
+        if need_html:
             result = run_marker(
                 filepath, options, artifact_dict, force_format='html')
             provenance = {
@@ -97,9 +113,14 @@ def convert_document(filepath, options, artifact_dict, progress_cb: ProgressCb =
             metadata = result.get('metadata')
             images.update(result.get('images') or {})
             html = result.get('output') or ''
+            done_passes += 1
+            if progress_cb:
+                progress_cb({
+                    'done': done_passes, 'total': n_passes, 'stage': 'convert'})
 
         if progress_cb:
-            progress_cb({'done': 1, 'total': 1, 'stage': 'done'})
+            progress_cb({
+                'done': n_passes, 'total': n_passes, 'stage': 'done'})
 
         return shape_response(
             options,

@@ -8,6 +8,8 @@ VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 PREFIX="${INSTALL_PREFIX:-/opt/marker-server/$VERSION}"
 MARKER_HOME_DEFAULT="${MARKER_HOME:-/opt/marker/2.0.0}"
 MARKER_USER="${MARKER_USER:-marker}"
+MARKER_STATE_DIR="${MARKER_STATE_DIR:-/var/lib/marker-server}"
+MARKER_DOCKER="${MARKER_DOCKER:-}"
 if [[ -n "${PYTHON_BIN:-}" ]]; then
   PYTHON_BIN="$PYTHON_BIN"
 elif command -v python3.12 >/dev/null 2>&1; then
@@ -18,7 +20,7 @@ fi
 
 echo "Installing marker-server $VERSION → $PREFIX"
 echo "  (will point at Marker home: $MARKER_HOME_DEFAULT)"
-echo "  (service user: $MARKER_USER)"
+echo "  (service user: $MARKER_USER, state: $MARKER_STATE_DIR)"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Re-running with sudo…"
@@ -26,6 +28,8 @@ if [[ "${EUID}" -ne 0 ]]; then
     INSTALL_PREFIX="$PREFIX" \
     MARKER_HOME="$MARKER_HOME_DEFAULT" \
     MARKER_USER="$MARKER_USER" \
+    MARKER_STATE_DIR="$MARKER_STATE_DIR" \
+    MARKER_DOCKER="$MARKER_DOCKER" \
     PYTHON_BIN="$PYTHON_BIN" \
     MARKER_OPENAI_BASE_URL="${MARKER_OPENAI_BASE_URL:-}" \
     MARKER_OPENAI_MODEL="${MARKER_OPENAI_MODEL:-}" \
@@ -36,19 +40,28 @@ fi
 
 MARKER_HOME="${MARKER_HOME:-$MARKER_HOME_DEFAULT}"
 
-# Dedicated unprivileged account for API + UI.
+mkdir -p "$MARKER_STATE_DIR"
+chmod 755 "$MARKER_STATE_DIR"
+
+# Dedicated unprivileged account (fixed home across version upgrades).
 if ! id -u "$MARKER_USER" >/dev/null 2>&1; then
-  useradd --system --home-dir "$PREFIX" --shell /sbin/nologin \
+  useradd --system --home-dir "$MARKER_STATE_DIR" --shell /sbin/nologin \
     --comment 'marker-server' "$MARKER_USER"
   echo "Created system user $MARKER_USER"
+else
+  usermod -d "$MARKER_STATE_DIR" "$MARKER_USER" 2>/dev/null || true
 fi
-for grp in video render docker; do
+chown "$MARKER_USER:$MARKER_USER" "$MARKER_STATE_DIR"
+chmod 700 "$MARKER_STATE_DIR"
+
+# GPU device nodes (not Docker — that is effectively root; see below).
+for grp in video render; do
   if getent group "$grp" >/dev/null 2>&1; then
     usermod -aG "$grp" "$MARKER_USER" || true
   fi
 done
 
-mkdir -p "$PREFIX"/{bin,server,uploads,jobs}
+mkdir -p "$PREFIX"/{bin,server,uploads,jobs,apache,docs}
 cp -a "$ROOT/server/." "$PREFIX/server/"
 cp -a "$ROOT/bin/." "$PREFIX/bin/"
 chmod 755 "$PREFIX/bin/"*.sh
@@ -57,7 +70,6 @@ chmod 644 "$PREFIX/server/"*.py
 CONFIG="$PREFIX/config.json"
 if [[ ! -f "$CONFIG" ]]; then
   cp "$ROOT/config.example.json" "$CONFIG"
-  chmod 600 "$CONFIG"
   "$PYTHON_BIN" - "$CONFIG" "$MARKER_HOME" "${LLAMA_CPP_BINARY:-}" \
     "${MARKER_OPENAI_BASE_URL:-}" "${MARKER_OPENAI_MODEL:-}" \
     "${MARKER_OPENAI_API_KEY:-}" <<'PY'
@@ -80,15 +92,15 @@ with open(path, 'w', encoding='utf-8') as fp:
     json.dump(data, fp, indent=2)
     fp.write('\n')
 PY
-  echo "Wrote $CONFIG (mode 600)"
+  echo "Wrote $CONFIG"
 else
   echo "Keeping existing $CONFIG"
 fi
 cp -f "$ROOT/config.example.json" "$PREFIX/config.example.json"
 cp -f "$ROOT/README.md" "$PREFIX/README.md"
 cp -f "$ROOT/VERSION" "$PREFIX/VERSION"
-mkdir -p "$PREFIX/docs"
 cp -a "$ROOT/docs/." "$PREFIX/docs/"
+cp -f "$ROOT/apache/"*.example "$PREFIX/apache/" 2>/dev/null || true
 
 # API runs under Marker's interpreter (bin/run-api.sh), so install the thin
 # HTTP stack into that venv. Keep a small local venv as UI fallback only.
@@ -108,25 +120,71 @@ pip install -U pip setuptools wheel
 pip install "${SERVER_DEPS[@]}"
 deactivate
 
-# Permissions: service user owns the prefix; can read Marker + write caches.
-chown -R "$MARKER_USER:$MARKER_USER" "$PREFIX"
+# --- permissions: root owns code; marker owns runtime dirs only ---
+chown -R root:root "$PREFIX"
+chmod -R u=rwX,go=rX "$PREFIX"
+chown -R "$MARKER_USER:$MARKER_USER" "$PREFIX/uploads" "$PREFIX/jobs"
 chmod 700 "$PREFIX/uploads" "$PREFIX/jobs"
-chmod 600 "$CONFIG"
+# Config readable by service, not writable.
+chown root:"$MARKER_USER" "$CONFIG"
+chmod 640 "$CONFIG"
+
 if [[ -d "$MARKER_HOME" ]]; then
-  # Readable tree; writable model/HF caches for downloads at runtime.
-  chmod -R a+rX "$MARKER_HOME" || true
+  # Do NOT chmod a+rX the whole tree (leaks HF tokens etc.).
+  # Grant the service user read/execute via ACL, or group fallback.
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -R -m "u:${MARKER_USER}:rX" "$MARKER_HOME" || true
+  else
+    chgrp -R "$MARKER_USER" "$MARKER_HOME" || true
+    chmod -R g+rX "$MARKER_HOME" || true
+  fi
   mkdir -p "$MARKER_HOME/cache" "$MARKER_HOME/hf"
-  chown -R "$MARKER_USER:$MARKER_USER" "$MARKER_HOME/cache" "$MARKER_HOME/hf" || true
+  chown -R "$MARKER_USER:$MARKER_USER" "$MARKER_HOME/cache" "$MARKER_HOME/hf"
+  chmod 700 "$MARKER_HOME/cache" "$MARKER_HOME/hf"
+fi
+
+# Docker group ≈ root. Opt out with MARKER_DOCKER=0; force with MARKER_DOCKER=1.
+NEED_DOCKER=0
+if [[ "$MARKER_DOCKER" == "0" ]]; then
+  NEED_DOCKER=0
+elif [[ "$MARKER_DOCKER" == "1" ]]; then
+  NEED_DOCKER=1
+elif [[ -f "$CONFIG" ]]; then
+  BACKEND="$("$PYTHON_BIN" - "$CONFIG" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as fp:
+    cfg = json.load(fp)
+backend = ((cfg.get('surya') or {}).get('inference_backend'))
+print('' if backend is None else str(backend).strip().lower())
+PY
+)"
+  if [[ -z "$BACKEND" || "$BACKEND" == "vllm" ]]; then
+    NEED_DOCKER=1
+  fi
+fi
+if [[ "$NEED_DOCKER" -eq 1 ]]; then
+  if getent group docker >/dev/null 2>&1; then
+    usermod -aG docker "$MARKER_USER" || true
+    echo "NOTE: $MARKER_USER added to docker (needed for Surya vLLM)."
+    echo "      Members of docker can effectively become root via containers."
+    echo "      Prefer MARKER_DOCKER=0 + surya.inference_backend=llamacpp to avoid this."
+  else
+    echo "WARNING: docker group missing; vLLM backend may fail until Docker is installed."
+  fi
+else
+  echo "Skipping docker group (MARKER_DOCKER=0 or non-vLLM backend)."
 fi
 
 UNIT_DIR=/etc/systemd/system
 sed -e "s|/opt/marker-server/0.1.0|$PREFIX|g" \
     -e "s|^User=marker$|User=$MARKER_USER|" \
     -e "s|^Group=marker$|Group=$MARKER_USER|" \
+    -e "s|/var/lib/marker-server|$MARKER_STATE_DIR|g" \
   "$ROOT/systemd/marker-server-api.service" > "$UNIT_DIR/marker-server-api.service"
 sed -e "s|/opt/marker-server/0.1.0|$PREFIX|g" \
     -e "s|^User=marker$|User=$MARKER_USER|" \
     -e "s|^Group=marker$|Group=$MARKER_USER|" \
+    -e "s|/var/lib/marker-server|$MARKER_STATE_DIR|g" \
   "$ROOT/systemd/marker-server-ui.service" > "$UNIT_DIR/marker-server-ui.service"
 
 ln -sfn "$PREFIX" /opt/marker-server/current
@@ -135,16 +193,12 @@ systemctl daemon-reload
 echo
 echo "Installed marker-server $VERSION"
 echo "  Prefix:  $PREFIX"
-echo "  Config:  $CONFIG"
-echo "  User:    $MARKER_USER"
+echo "  Config:  $CONFIG (root:$MARKER_USER mode 640)"
+echo "  User:    $MARKER_USER (home $MARKER_STATE_DIR)"
 echo "  Marker:  marker.home → $MARKER_HOME"
 if [[ ! -x "$MARKER_HOME/venv/bin/python" ]]; then
   echo "  WARNING: Marker python missing at $MARKER_HOME/venv/bin/python"
   echo "           Install vanilla Marker first, then set marker.home in config.json."
 fi
-mkdir -p "$PREFIX/apache"
-cp -f "$ROOT/apache/"*.example "$PREFIX/apache/" 2>/dev/null || true
-chown -R "$MARKER_USER:$MARKER_USER" "$PREFIX/apache" "$PREFIX/docs" 2>/dev/null || true
 echo "  Edit llm.* and runtime.cuda_visible_devices in config.json, then:"
 echo "    sudo systemctl enable --now marker-server-api.service marker-server-ui.service"
-echo "  If Surya uses Docker/vLLM, ensure $MARKER_USER is in the docker group and re-login/restart."

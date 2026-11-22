@@ -111,6 +111,8 @@ Returned by upload, status, and cancel.
 
 Clients that want a percentage compute `done / total` themselves. There is no fraction field and no human-readable progress string.
 
+The server uses these updates for **stall detection**: if `total > 1` and no progress callback arrives for `progress_stall_seconds`, the job is failed. Total job duration can exceed that as long as units keep completing.
+
 ### `stage` (informational)
 
 Examples: `probe`, `plan`, `chunk`, `table_repair`, `seam_polish`, `stitch`, `convert`, `done`, `failed`, `cancelled`. Treat as optional telemetry; **`done`/`total` are authoritative for progress.**
@@ -452,7 +454,7 @@ The browser UI (`:8002`) does not redefine the API; it proxies:
 ## Notes for integrators
 
 1. **Auth:** this API has no built-in authentication. Keep it on localhost or protect it at the reverse proxy.
-2. **Timeouts:** do not use a short HTTP timeout on `/result` polling loops; use short timeouts on status polls and a long timeout only when fetching a large result body.
+2. **Timeouts:** conversion jobs have **no absolute wall-clock limit**. They fail only if a progress unit (chunk or Marker pass) reports no update for `runtime.progress_stall_seconds` (default 7200). HTTP timeouts on clients/proxies should cover upload/result transfer and status polls only — not total conversion time. Single-pass jobs (`progress.total ≤ 1`) have no mid-run progress, so the stall watchdog does not apply to them.
 3. **Concurrency:** submitting many jobs is fine; they queue. Only one runs. Don’t also run Marker CLI on the same GPU during a heavy job.
 4. **Chunking + `page_range`:** a non-empty `page_range` turns off auto page-block splitting for that request. Any request that includes HTML (`profile=html` or `include_html=true`) always uses a single Marker pass (no HTML stitcher).
 5. **Dual / mixed deliveries:** `profile=dual` (or any request that asks for both markdown and blocks) currently runs Marker once per output format. Expect roughly 2× GPU time until a single-build multi-render path lands.
