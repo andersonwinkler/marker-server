@@ -41,6 +41,7 @@ marker-server/
   bin/run-ui.sh
   server/                   ← FastAPI app (no Marker weights)
   scripts/install.sh        → /opt/marker-server/<VERSION>/
+  scripts/uninstall.sh      ← stop services; remove prefix (optional --all/--purge)
   systemd/
     marker-server-api.service
     marker-server-ui.service
@@ -81,6 +82,14 @@ sudoedit /opt/marker-server/current/config.json   # mode 600
 
 # 4) Enable
 sudo systemctl enable --now marker-server-api.service marker-server-ui.service
+```
+
+Uninstall (leaves Marker itself alone):
+
+```bash
+./scripts/uninstall.sh              # stop services, remove this VERSION under /opt
+./scripts/uninstall.sh --all        # remove every /opt/marker-server/* version
+./scripts/uninstall.sh --purge      # also drop marker user, state dir, and Marker ACLs
 ```
 
 `install.sh`:
