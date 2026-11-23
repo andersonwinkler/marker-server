@@ -41,11 +41,8 @@ RedirectMatch ^/marker-api$ /marker-api/
     </RequireAny>
 </Location>
 
-# UI JS uses root-absolute fetch("/convert") and fetch("/jobs/…").
+# UI derives the /marker prefix from location.pathname (no fetch rewrite).
 <Location /marker>
-    AddOutputFilterByType INFLATE;SUBSTITUTE;DEFLATE text/html
-    Substitute 's|fetch("/convert"|fetch("/marker/convert"|n'
-    Substitute 's|fetch("/jobs/|fetch("/marker/jobs/|n'
 </Location>
 
 ProxyPass        "/marker-api/" "http://127.0.0.1:8001/" timeout=21600

@@ -60,7 +60,7 @@ Typical prefixes:
 
 ## Prerequisites
 
-1. **Vanilla Marker** installed and importable, e.g. `/opt/marker/2.0.0/venv/bin/python` with `marker-pdf` installed.
+1. **Vanilla Marker** installed and importable, e.g. `/opt/marker/2.2.0/venv/bin/python` with `marker-pdf` installed.
 2. **NVIDIA GPU + driver** if you want GPU OCR (recommended).
 3. **Docker** (with NVIDIA Container Toolkit) if you leave Surya’s backend on the default **vLLM** path (NVIDIA). You do **not** need a hand-built `llama-server` unless you set `surya.inference_backend` to `llamacpp`.
 4. Optional **OpenAI-compatible vision** endpoint for Marker `use_llm` (tables/equations refinement, seam polish). Configure later in `config.json`; default is off.
@@ -71,10 +71,10 @@ Typical prefixes:
 
 ```bash
 # 1) Vanilla Marker (example; use your own installer or pip + GGUFs)
-#    Result: /opt/marker/2.0.0/venv/bin/python works with `import marker`
+#    Result: /opt/marker/2.2.0/venv/bin/python works with `import marker`
 
 # 2) This server
-export MARKER_HOME=/opt/marker/2.0.0
+export MARKER_HOME=/opt/marker/2.2.0
 ./scripts/install.sh
 
 # 3) Edit secrets / GPU / LLM
@@ -127,7 +127,7 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 
 | Key | Meaning |
 |-----|---------|
-| `cuda_visible_devices` | GPU index or UUID for the API process |
+| `cuda_visible_devices` | One GPU index or UUID for Marker **and** Surya’s vLLM docker (`VLLM_GPUS`). Prefer a UUID (`nvidia-smi -L`) so the card stays fixed when device order changes. Use a single device — comma-separated lists are not reliable with Surya’s docker `--gpus` flag |
 | `torch_device` | Usually `cuda` |
 | `host` / `port` / `ui_port` | Bind addresses |
 | `upload_dir` | Temp uploads; default `<prefix>/uploads` |
@@ -141,13 +141,17 @@ Path resolution order: `MARKER_SERVER_CONFIG` → `MARKER_CONFIG_FILE` → `<pre
 
 | Key | Meaning |
 |-----|---------|
-| `inference_backend` | `null`/omit = Surya auto (vLLM on NVIDIA). Or `vllm` / `llamacpp` |
-| `llama_cpp_binary` | Only if using `llamacpp` |
+| `inference_backend` | `null`/omit = Surya auto (vLLM on NVIDIA). Or `vllm` / `llamacpp` (prefer `llamacpp` on Turing / older cards that reject bf16) |
+| `llama_cpp_binary` | Path to CUDA `llama-server` when using `llamacpp` (e.g. `/opt/llama.cpp/current/bin/llama-server`) |
 | `gguf_model` / `gguf_mmproj` | Optional; default under `marker.home/surya-ocr-2/` if files exist |
-| `inference_parallel` | Concurrent OCR slots |
+| `inference_parallel` | Concurrent OCR slots (keep low on small GPUs) |
+| `inference_ctx_size` | Optional integer total KV ctx for llama-server (default Surya scales with parallel) |
 | `inference_keep_alive` | Keep spawned OCR server between jobs |
 | `guided_layout` | Surya guided layout flag |
 | `llama_cpp_extra_args` | Extra args for llama-server when used |
+| `vllm_gpus` | Override for Surya’s docker `--gpus device=…` (defaults to `runtime.cuda_visible_devices`). Surya’s own default is `"0"`, which ignores CUDA remapping — set a UUID when the OCR GPU is not host index 0 |
+| `vllm_gpu_type` | Optional; Surya batch sizing hint. Known values: `t4`, `l4`, `a10`, `3090`, `4090`, `5090`, `l40s`, `a100`, `a100-40`, `a100-80`, `h100`, `h200`, `b200`, `b300` |
+| `vllm_gpu_memory_utilization` | Optional float for vLLM (e.g. `0.7` on smaller cards) |
 
 ### `llm` (server-only; never accept these from clients)
 

@@ -14,6 +14,14 @@ _SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 _SERVER_ROOT = os.path.dirname(_SERVER_DIR)  # …/marker-server/<version>
 
 
+class IncompleteConfig(RuntimeError):
+    '''Required config is missing (e.g. marker.home). Safe to ignore at import.'''
+
+
+class ConfigError(ValueError):
+    '''Invalid value in config.json.'''
+
+
 def env_bool(name, default=False):
     val = os.getenv(name)
     if val is None:
@@ -65,9 +73,9 @@ def marker_home():
     '''Absolute path to the vanilla Marker install (…/opt/marker/<ver>).'''
     home = _section('marker').get('home') or os.getenv('MARKER_HOME')
     if not home:
-        raise RuntimeError(
+        raise IncompleteConfig(
             'marker.home is not set in config.json '
-            '(expected a vanilla Marker prefix such as /opt/marker/2.0.0)')
+            '(expected a vanilla Marker prefix such as /opt/marker/2.2.0)')
     return os.path.abspath(home)
 
 
@@ -87,7 +95,7 @@ def runtime_settings():
     home = None
     try:
         home = marker_home()
-    except RuntimeError:
+    except IncompleteConfig:
         home = None
     upload = rt.get('upload_dir') or os.getenv('MARKER_UPLOAD_DIR')
     if not upload:
@@ -148,9 +156,17 @@ def surya_env_from_config():
         gguf_dir, 'surya-2.gguf')
     gguf_mmproj = surya.get('gguf_mmproj') or os.path.join(
         gguf_dir, 'surya-2-mmproj.gguf')
+    # Surya's vLLM docker spawn uses VLLM_GPUS (default "0" = host GPU 0),
+    # which ignores CUDA_VISIBLE_DEVICES remapping. Always pass the same
+    # device id/UUID as runtime.cuda_visible_devices (or surya.vllm_gpus).
+    cuda_dev = str(rt['cuda_visible_devices'])
+    vllm_gpus = surya.get('vllm_gpus')
+    if vllm_gpus is None or str(vllm_gpus).strip() == '':
+        vllm_gpus = cuda_dev
     env = {
-        'CUDA_VISIBLE_DEVICES': str(rt['cuda_visible_devices']),
+        'CUDA_VISIBLE_DEVICES': cuda_dev,
         'TORCH_DEVICE': str(rt['torch_device']),
+        'VLLM_GPUS': str(vllm_gpus).strip(),
         'MODEL_CACHE_DIR': os.path.join(home, 'cache'),
         'HF_HOME': os.path.join(home, 'hf'),
         'SURYA_INFERENCE_PARALLEL': str(
@@ -160,6 +176,12 @@ def surya_env_from_config():
         'SURYA_GUIDED_LAYOUT': (
             '1' if surya.get('guided_layout', False) else '0'),
         'MARKER_UPLOAD_DIR': str(rt['upload_dir'])}
+    vllm_gpu_type = surya.get('vllm_gpu_type')
+    if vllm_gpu_type:
+        env['VLLM_GPU_TYPE'] = str(vllm_gpu_type)
+    vllm_mem = surya.get('vllm_gpu_memory_utilization')
+    if vllm_mem is not None:
+        env['VLLM_GPU_MEMORY_UTILIZATION'] = str(vllm_mem)
     backend = surya.get('inference_backend')
     if backend:
         env['SURYA_INFERENCE_BACKEND'] = str(backend)
@@ -173,6 +195,14 @@ def surya_env_from_config():
     extra = surya.get('llama_cpp_extra_args')
     if extra:
         env['LLAMA_CPP_EXTRA_ARGS'] = str(extra)
+    ctx_size = surya.get('inference_ctx_size')
+    if ctx_size is not None:
+        try:
+            env['SURYA_INFERENCE_CTX_SIZE'] = str(int(ctx_size))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                'surya.inference_ctx_size must be an integer '
+                f'(got {ctx_size!r})') from exc
     return env
 
 
@@ -181,7 +211,7 @@ def apply_runtime_env():
     try:
         for key, value in surya_env_from_config().items():
             os.environ[key] = value
-    except RuntimeError:
+    except IncompleteConfig:
         # Config incomplete (e.g. docs import); leave existing env alone.
         pass
     rt = runtime_settings()

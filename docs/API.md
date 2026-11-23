@@ -55,11 +55,11 @@ Returns install provenance. **Never** includes `openai_base_url` or `openai_api_
 ```json
 {
   "marker_server_config": "/opt/marker-server/0.1.0/config.json",
-  "marker_home": "/opt/marker/2.0.0",
-  "marker_python": "/opt/marker/2.0.0/venv/bin/python",
+  "marker_home": "/opt/marker/2.2.0",
+  "marker_python": "/opt/marker/2.2.0/venv/bin/python",
   "marker_home_error": null,
-  "marker_version": "2.0.0",
-  "surya_version": "0.22.1",
+  "marker_version": "2.2.0",
+  "surya_version": "0.23.0",
   "cuda_visible_devices": "0",
   "llm_enabled": false,
   "llm_model": null,
@@ -150,7 +150,7 @@ Multipart form upload. Starts a job and returns immediately with a job object.
 | `output_format` | string | no | from profile | Usually leave unset; use `profile` |
 | `use_llm` | bool | no | server config | Use server-configured vision LLM |
 | `llm_scope` | string | no | — | `full` \| `tables_equations` \| `none` |
-| `extract_images` | bool | no | Marker default | Extract figure crops |
+| `extract_images` | bool | no | Marker default (`true`) | Extract figure crops; set `false` for text-only output (UI: “Text only”) |
 | `ocr_inline_math` | bool | no | — | OCR inline math (useful with `fast`) |
 | `disable_ocr` | bool | no | — | Skip OCR entirely |
 | `highres_image_dpi` | int | no | — | DPI for OCR / equation crops |
@@ -367,8 +367,8 @@ Updated job object (for a purged finished job, this is a final snapshot).
     "table_repairs": [],
     "soft_errors": []
   },
-  "marker_version": "2.0.0",
-  "surya_version": "0.22.1",
+  "marker_version": "2.2.0",
+  "surya_version": "0.23.0",
   "llm_model": null
 }
 ```

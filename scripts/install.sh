@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 PREFIX="${INSTALL_PREFIX:-/opt/marker-server/$VERSION}"
-MARKER_HOME_DEFAULT="${MARKER_HOME:-/opt/marker/2.0.0}"
+MARKER_HOME_DEFAULT="${MARKER_HOME:-/opt/marker/2.2.0}"
 MARKER_USER="${MARKER_USER:-marker}"
 MARKER_STATE_DIR="${MARKER_STATE_DIR:-/var/lib/marker-server}"
 MARKER_DOCKER="${MARKER_DOCKER:-}"

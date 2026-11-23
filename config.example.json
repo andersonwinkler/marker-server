@@ -1,6 +1,6 @@
 {
   "marker": {
-    "home": "/opt/marker/2.0.0",
+    "home": "/opt/marker/2.2.0",
     "python": null
   },
   "auth": {
@@ -25,9 +25,13 @@
     "gguf_model": null,
     "gguf_mmproj": null,
     "inference_parallel": 2,
+    "inference_ctx_size": null,
     "inference_keep_alive": true,
     "guided_layout": false,
-    "llama_cpp_extra_args": null
+    "llama_cpp_extra_args": null,
+    "vllm_gpus": null,
+    "vllm_gpu_type": null,
+    "vllm_gpu_memory_utilization": null
   },
   "llm": {
     "use_llm": false,

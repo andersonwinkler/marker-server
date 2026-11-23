@@ -151,6 +151,7 @@ PAGE = '''<!DOCTYPE html>
       </div>
       <label class="check"><input type="checkbox" name="force_ocr"> Force OCR on every page</label>
       <label class="check"><input type="checkbox" name="use_llm" checked> Use vision LLM (server-configured)</label>
+      <label class="check"><input type="checkbox" name="text_only"> Text only (no images in output)</label>
       <div><button id="go" type="submit">Convert</button></div>
     </form>
     <p id="status"></p>
@@ -168,6 +169,16 @@ PAGE = '''<!DOCTYPE html>
 <script>
 const KEY_STORE = "marker-server-api-key";
 const REMEMBER_STORE = "marker-server-api-key-remember";
+// When served under Apache /marker/, root-absolute /convert hits the site
+// root instead of the UI. Derive the mount prefix from the page URL.
+const UI_BASE = (() => {
+  const path = window.location.pathname || "/";
+  const marker = path.match(/^(.*\\/marker)(?:\\/|$)/);
+  return marker ? marker[1] : "";
+})();
+function uiUrl(path) {
+  return UI_BASE + path;
+}
 const gate = document.getElementById("gate");
 const app = document.getElementById("app");
 const keyform = document.getElementById("keyform");
@@ -228,7 +239,7 @@ function showApp() {
   keystatus.textContent = "";
 }
 async function probe(headers) {
-  return fetch("/jobs/__auth_probe__", { headers: headers || {} });
+  return fetch(uiUrl("/jobs/__auth_probe__"), { headers: headers || {} });
 }
 async function validateKey(key) {
   const res = await probe({ "Authorization": "Bearer " + key });
@@ -403,9 +414,19 @@ function detailMessage(payload, fallback) {
   if (payload.error) return payload.error;
   return fallback;
 }
-async function apiFetch(url, options) {
+async function readJson(res) {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch (err) {
+    throw new Error(
+      "Expected JSON from " + res.url + " (HTTP " + res.status + "), got: "
+      + text.slice(0, 120).replace(/\\s+/g, " "));
+  }
+}
+async function apiFetch(path, options) {
   const opts = options || {};
-  const res = await fetch(url, Object.assign({}, opts, {
+  const res = await fetch(uiUrl(path), Object.assign({}, opts, {
     headers: authHeaders(opts.headers)
   }));
   if (res.status === 401) {
@@ -435,6 +456,8 @@ form.addEventListener("submit", async e => {
   body.append("chunking", form.chunking.value);
   body.append("force_ocr", form.force_ocr.checked ? "true" : "false");
   body.append("use_llm", form.use_llm.checked ? "true" : "false");
+  body.append("extract_images", form.text_only.checked ? "false" : "true");
+  if (form.text_only.checked) body.append("image_delivery", "none");
   if (form.page_range.value.trim()) body.append("page_range", form.page_range.value.trim());
   go.disabled = true;
   result.style.display = "none";
@@ -443,7 +466,7 @@ form.addEventListener("submit", async e => {
   const started = Date.now();
   try {
     const startRes = await apiFetch("/convert", { method: "POST", body });
-    const start = await startRes.json();
+    const start = await readJson(startRes);
     if (!startRes.ok) throw new Error(detailMessage(start, "Upload failed"));
     const jobId = start.job_id;
     if (!jobId) throw new Error("No job_id returned");
@@ -453,14 +476,14 @@ form.addEventListener("submit", async e => {
       setProgress(st.progress?.done || 0, st.progress?.total || 0);
       await sleep(1500);
       const poll = await apiFetch("/jobs/" + jobId);
-      st = await poll.json();
+      st = await readJson(poll);
       if (!poll.ok) throw new Error(detailMessage(st, "Poll failed"));
     }
     if (st.status === "failed") throw new Error(st.error || "Conversion failed");
     if (st.status === "cancelled") throw new Error("Job cancelled");
 
     const res = await apiFetch("/jobs/" + jobId + "/result");
-    const data = await res.json();
+    const data = await readJson(res);
     if (!res.ok || data.success === false) throw new Error(detailMessage(data, "Result failed"));
 
     const out = data.markdown != null ? data.markdown
