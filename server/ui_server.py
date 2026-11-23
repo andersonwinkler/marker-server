@@ -87,7 +87,15 @@ PAGE = '''<!DOCTYPE html>
   .bar > span { display: block; height: 100%; width: 0; background: #1c1915; }
   #gate, #app { display: none; }
   #gate.active, #app.active { display: block; }
-  .headrow { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; justify-content: space-between; }
+  .foot {
+    margin-top: 40px; padding-top: 16px; border-top: 1px solid #e4ddd2;
+    font-size: 12px; color: #8a8175;
+  }
+  .foot button.linkish {
+    font: inherit; font-size: 12px; background: none; border: 0; padding: 0;
+    color: #8a8175; text-decoration: underline; cursor: pointer;
+  }
+  .foot button.linkish:hover { color: #5c564c; }
 </style>
 </head>
 <body>
@@ -108,13 +116,8 @@ PAGE = '''<!DOCTYPE html>
   </section>
 
   <section id="app">
-    <div class="headrow">
-      <div>
-        <h1>Marker</h1>
-        <p class="lead">Drop a file, or choose one. Long documents are converted in page blocks; progress updates while you wait.</p>
-      </div>
-      <button type="button" id="clearkey" class="secondary">Clear API key</button>
-    </div>
+    <h1>Marker</h1>
+    <p class="lead">Drop a file, or choose one. Long documents are converted in page blocks; progress updates while you wait.</p>
     <form id="form">
       <label class="drop" id="drop">
         <input id="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.tif,.tiff,.bmp,.docx,.pptx,.xlsx,.html,.htm,.epub,application/pdf">
@@ -127,7 +130,7 @@ PAGE = '''<!DOCTYPE html>
             <option value="clean">Clean markdown</option>
             <option value="paginated">Paginated markdown</option>
             <option value="rag">RAG chunks</option>
-            <option value="dual">Dual (markdown + chunks)</option>
+            <option value="dual">Dual (clean md + chunks)</option>
             <option value="layout">Layout JSON</option>
             <option value="html">HTML</option>
           </select>
@@ -164,6 +167,7 @@ PAGE = '''<!DOCTYPE html>
       <pre id="preview"></pre>
       <iframe id="frame" sandbox hidden></iframe>
     </section>
+    <p class="foot"><button type="button" id="clearkey" class="linkish">Clear saved API key</button></p>
   </section>
 </main>
 <script>
